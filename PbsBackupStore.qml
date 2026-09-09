@@ -305,8 +305,12 @@ Singleton {
   // every time the dropdown repaints.
   property string browseSnapshotId: ""
 
-  function loadArchives() {
-    // overload for snapshot id argument omitted — see loadArchivesFor
+  function loadArchives(snapshotId) {
+    // RestoreBrowser.qml:307 calls this with a snapshot id when the user
+    // picks a different snapshot from the dropdown. The implementation
+    // lives in loadArchivesFor — this is just the no-arg overload that
+    // delegate here would have hidden.
+    loadArchivesFor(snapshotId)
   }
 
   function loadArchivesFor(snapshotId) {

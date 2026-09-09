@@ -515,6 +515,40 @@ test_openconfig_xdg_config_home() {
   TESTS_RUN=$((TESTS_RUN + 1))
 }
 
+# H1 fix: loadArchives(snapshotId) was a stub. Picking a different
+# snapshot in the restore browser left the archives list unchanged
+# because the function did nothing. After the fix it must dispatch to
+# loadArchivesFor(snapshotId).
+test_load_archives_dispatches() {
+  # Extract just the loadArchives function body — everything between its
+  # opening { and the next line that is exactly "  }".
+  local fn
+  fn="$(awk '
+    /^  function loadArchives\(/ { inside=1 }
+    inside { print }
+    inside && /^  }$/ { inside=0 }
+  ' PbsBackupStore.qml)"
+  # Strip comments, then look for an actual call to loadArchivesFor.
+  local body
+  body="$(printf '%s\n' "$fn" | sed 's|//.*||')"
+  if printf '%s\n' "$body" | grep -qE 'loadArchivesFor[[:space:]]*\('; then
+    printf '  ok    loadArchives dispatches to loadArchivesFor\n'
+  else
+    printf '  FAIL  loadArchives does not dispatch to loadArchivesFor\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+
+  # The function must accept a snapshotId argument, not the zero-arg stub.
+  if printf '%s\n' "$fn" | grep -qE 'loadArchives\(\) \{'; then
+    printf '  FAIL  loadArchives is the zero-arg stub\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  else
+    printf '  ok    loadArchives accepts a snapshotId argument\n'
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
 # Run all tests.
 main() {
   printf 'omarchy-pbs-backup tests\n'
@@ -545,6 +579,7 @@ main() {
   test_openlog_picks_most_recent
   test_openlog_wired_in_panel
   test_openconfig_xdg_config_home
+  test_load_archives_dispatches
   printf -- '------------------------\n'
   printf '%d checks run, %d failed\n' "$TESTS_RUN" "$TESTS_FAILED"
   [ "$TESTS_FAILED" = "0" ]
