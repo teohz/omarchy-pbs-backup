@@ -163,9 +163,13 @@ PBS each group's snapshots will land.
 ## Manual usage
 
 ```bash
-# Dry-run a backup (prints the proxmox-backup-client command):
+# Dry-run a single backup (prints the proxmox-backup-client command):
 ~/.config/omarchy/plugins/teohz.pbs-backup/bin/omarchy-pbs-backup \
   backup --dest external-drive --dry-run
+
+# Run every configured group sequentially (one fails, the rest still run;
+# the command exits non-zero if any group failed):
+~/.config/omarchy/plugins/teohz.pbs-backup/bin/omarchy-pbs-backup backup --all
 
 # Inspect what the bar would show:
 ~/.config/omarchy/plugins/teohz.pbs-backup/bin/omarchy-pbs-backup status --json
