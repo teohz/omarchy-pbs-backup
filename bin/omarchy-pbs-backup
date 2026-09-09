@@ -1159,18 +1159,19 @@ record_status() {
   if [ "$result" != "failed" ]; then
     local bid; bid="$(group_backup_id)"
     local group; group="$(pbs_group "$bid")"
-    local raw
-    raw="$(pbs_run snapshot list "$group" --output-format json 2>/dev/null \
-      | head -c "$((SNAPSHOT_BYTE_CAP + 1))" \
-      | jq -r 'length' 2>/dev/null)" || raw=""
-    snapshot_count="$(number_or "$raw" 0)"
-
     # PBS has no cheap "repo size" command on the client side; the per-group
     # size lives in snapshot list's `.size` field summed across snapshots.
+    # One call, two numbers: the count and the size sum share the same
+    # truncated JSON payload.
+    local raw
     raw="$(pbs_run snapshot list "$group" --output-format json 2>/dev/null \
-      | head -c "$((SNAPSHOT_BYTE_CAP + 1))" \
-      | jq -r '[.[] | (.size // 0)] | add // 0' 2>/dev/null)" || raw=""
-    repo_size="$(number_or "$raw" 0)"
+      | head -c "$((SNAPSHOT_BYTE_CAP + 1))")" || raw=""
+    local counts
+    counts="$(jq -nr --argjson j "${raw:-[]}" \
+      '[$j | length, ([$j[] | (.size // 0)] | add // 0)]' 2>/dev/null)" \
+      || counts="[0,0]"
+    snapshot_count="$(number_or "$(jq -nr --argjson c "$counts" '$c[0]')" 0)"
+    repo_size="$(number_or "$(jq -nr --argjson c "$counts" '$c[1]')" 0)"
   fi
 
   jq \

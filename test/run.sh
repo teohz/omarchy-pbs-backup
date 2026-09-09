@@ -384,6 +384,24 @@ test_groups_table_no_duplicate_count() {
   TESTS_RUN=$((TESTS_RUN + 1))
 }
 
+# H4 fix: record_status must call `snapshot list` at most once per backup.
+# The bug was two back-to-back `pbs_run snapshot list` invocations: one to
+# count snapshots, one to sum sizes. Both could be done from the same JSON
+# payload.
+test_record_status_calls_snapshot_list_once() {
+  local fn
+  fn="$(awk '/^record_status\(\)/,/^}/' "$SCRIPT")"
+  local count
+  count="$(printf '%s\n' "$fn" | grep -c 'pbs_run snapshot list')"
+  if [ "$count" -gt 1 ]; then
+    printf '  FAIL  record_status runs snapshot list %d times\n' "$count"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  else
+    printf '  ok    record_status runs snapshot list at most once\n'
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
 # Run all tests.
 main() {
   printf 'omarchy-pbs-backup tests\n'
@@ -407,6 +425,7 @@ main() {
   test_key_show_no_secret
   test_key_set_writes_secret
   test_groups_table_no_duplicate_count
+  test_record_status_calls_snapshot_list_once
   printf -- '------------------------\n'
   printf '%d checks run, %d failed\n' "$TESTS_RUN" "$TESTS_FAILED"
   [ "$TESTS_FAILED" = "0" ]
