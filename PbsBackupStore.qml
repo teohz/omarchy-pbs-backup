@@ -472,17 +472,47 @@ Singleton {
   }
 
   function unmount() {
-    if (browseName === "") return
-    var proc = {
-      command: [root.cli, "unmount", "--dest", String(browseName)],
-      running: true
-    }
     // Fire-and-forget; we don't care about the result. Use Process via JS:
-    unmountProc.command = proc.command
+    // Iterate every group that has ever been mounted so a stale mount
+    // from a previous group doesn't leak just because the user switched
+    // browseName before closing the panel.
+    var targets = []
+    if (browseName !== "") targets.push(browseName)
+    for (var i = 0; i < groups.length; i++) {
+      var n = String(groups[i].name)
+      if (targets.indexOf(n) === -1) targets.push(n)
+    }
+    if (targets.length === 0) return
+    // Run one unmount per target; cmd_unmount cleans the entire per-group
+    // mount subtree, so calling it for each is idempotent.
+    unmountProc.command = [root.cli, "unmount", "--dest", String(targets[0])]
     unmountProc.running = true
+    // For remaining targets, schedule follow-ups. Simplest correct path:
+    // chain them via Timer so we don't run two unmounts in parallel that
+    // would race on the same directories.
+    if (targets.length > 1) {
+      unmountFollowups.targets = targets.slice(1)
+      unmountFollowups.index = 0
+      unmountFollowups.running = true
+    }
   }
 
   Process { id: unmountProc }
+  Timer {
+    id: unmountFollowups
+    property var targets: []
+    property int index: 0
+    interval: 200
+    repeat: false
+    onTriggered: {
+      if (index >= targets.length) return
+      var t = targets[index]
+      index = index + 1
+      unmountProc.command = [root.cli, "unmount", "--dest", String(t)]
+      unmountProc.running = true
+      running = true
+    }
+  }
 
   // --- formatting -------------------------------------------------------
   function plain(value) {
