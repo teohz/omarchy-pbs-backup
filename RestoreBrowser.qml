@@ -59,6 +59,37 @@ FocusScope {
   property var selected: null
   property string filter: ""
 
+  // PBS returns a manifest blob and a chunk index per archive. Only
+  // .pxar (user files) and .mpxar (host metadata) are directly
+  // mountable; the rest are PBS-internal bookkeeping the user should
+  // never have to choose between. Filter them out at the source so the
+  // dropdown, the auto-select, and the picker visibility all agree.
+  function isMountable(name) {
+    if (!name) return false
+    var n = String(name)
+    if (n.indexOf("..") !== -1) return false
+    // Skip the snapshot manifest and the catalog file.
+    if (n.endsWith(".blob")) return false
+    if (n.endsWith(".pcat1")) return false
+    return /\.pxar(\.didx)?$/.test(n) || /\.mpxar(\.didx)?$/.test(n)
+  }
+
+  function archiveKind(name) {
+    var n = String(name)
+    if (/\.pxar(\.didx)?$/.test(n)) return "files"
+    if (/\.mpxar(\.didx)?$/.test(n)) return "host"
+    return ""
+  }
+
+  readonly property var mountableArchives: {
+    var list = []
+    for (var i = 0; i < PbsBackupStore.archives.length; i++) {
+      var a = PbsBackupStore.archives[i]
+      if (root.isMountable(a && a.name)) list.push(a)
+    }
+    return list
+  }
+
   // Kept with the active snapshot so archive selection stays stable while
   // snapshots update asynchronously.
   property var archivesList: []
@@ -225,17 +256,34 @@ FocusScope {
       if (root.snapshotId === "" && PbsBackupStore.snapshots.length > 0) {
         var first = PbsBackupStore.snapshots[0]
         root.snapshotId = String(first.id)
-        if (root.archiveName === "" && PbsBackupStore.archives.length > 0)
-          root.archiveName = String(PbsBackupStore.archives[0].name)
+        if (root.archiveName === "" && root.mountableArchives.length > 0)
+          root.archiveName = String(root.mountableArchives[0].name)
         if (root.archiveName !== "")
           root.openArchive(root.snapshotId, root.archiveName)
       }
     }
     function onArchivesChanged() {
-      if (root.archiveName === "" && PbsBackupStore.archives.length > 0) {
-        root.archiveName = String(PbsBackupStore.archives[0].name)
+      if (root.archiveName === "" && root.mountableArchives.length > 0) {
+        root.archiveName = String(root.mountableArchives[0].name)
         if (root.snapshotId !== "")
           root.openArchive(root.snapshotId, root.archiveName)
+      }
+      // If the currently-selected archive is no longer in the mountable
+      // list (e.g. PBS rotated it), fall back to the first mountable
+      // archive so the user doesn't end up trying to mount something
+      // that isn't there.
+      else if (root.archiveName !== "" && root.mountableArchives.length > 0) {
+        var stillThere = false
+        for (var i = 0; i < root.mountableArchives.length; i++) {
+          if (String(root.mountableArchives[i].name) === root.archiveName) {
+            stillThere = true; break
+          }
+        }
+        if (!stillThere) {
+          root.archiveName = String(root.mountableArchives[0].name)
+          if (root.snapshotId !== "")
+            root.openArchive(root.snapshotId, root.archiveName)
+        }
       }
     }
   }
@@ -323,7 +371,9 @@ FocusScope {
     RowLayout {
       width: parent.width
       spacing: Style.space(8)
-      visible: root.archiveName !== "" || PbsBackupStore.archives.length > 1
+      // Show the picker when we have a selection, OR when there is more
+      // than one mountable archive to choose between.
+      visible: root.archiveName !== "" || root.mountableArchives.length > 1
 
       Text {
         Layout.alignment: Qt.AlignVCenter
@@ -343,11 +393,21 @@ FocusScope {
         fontFamily: root.fontFamily
         value: root.archiveName
         options: {
+          // Use the filtered list (.blob/.pcat1 hidden, only mountable
+          // archives shown) and label each entry by what it contains
+          // so the user doesn't have to guess which one holds their
+          // files.
           var list = []
-          for (var i = 0; i < PbsBackupStore.archives.length; i++) {
-            var a = PbsBackupStore.archives[i]
-            list.push({ value: String(a.name),
-                        label: String(a.name) + (a.size ? "  (" + PbsBackupStore.humanBytes(a.size) + ")" : "") })
+          for (var i = 0; i < root.mountableArchives.length; i++) {
+            var a = root.mountableArchives[i]
+            var kind = root.archiveKind(a.name)
+            var prefix = kind === "files" ? "Files"
+                       : kind === "host"  ? "Host metadata"
+                       : ""
+            var label = prefix ? (prefix + " \u2014 " + String(a.name))
+                               : String(a.name)
+            if (a.size) label += "  (" + PbsBackupStore.humanBytes(a.size) + ")"
+            list.push({ value: String(a.name), label: label })
           }
           return list
         }
