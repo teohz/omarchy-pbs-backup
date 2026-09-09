@@ -197,13 +197,19 @@ Singleton {
 
   function openConfig() {
     configProc.command = ["omarchy-launch-editor",
-                          homeDir + "/.config/omarchy-pbs-backup/config.json"]
+                          root.configHome + "/omarchy-pbs-backup/config.json"]
     configProc.running = true
   }
 
   Process { id: configProc }
 
   readonly property string homeDir: Quickshell.env("HOME")
+
+  // Mirror the CLI's ${XDG_CONFIG_HOME:-$HOME/.config} expansion. The
+  // QML widget used to hard-code $HOME/.config, which silently pointed
+  // at the wrong file when the user had XDG_CONFIG_HOME set.
+  readonly property string configHome:
+    Quickshell.env("XDG_CONFIG_HOME") || (homeDir + "/.config")
 
   // Any group with a log file we could open. Drives the visibility of the
   // "Show Last Log" menu row.

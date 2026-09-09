@@ -499,6 +499,22 @@ test_openlog_wired_in_panel() {
   TESTS_RUN=$((TESTS_RUN + 1))
 }
 
+# M2 fix: openConfig() must honor XDG_CONFIG_HOME. The CLI uses
+# ${XDG_CONFIG_HOME:-$HOME/.config}/... — the QML side hard-coded
+# $HOME/.config, so a user with XDG_CONFIG_HOME set got the editor
+# pointed at the wrong file.
+test_openconfig_xdg_config_home() {
+  local fn
+  fn="$(awk '/^  function openConfig\(/,/^  }/' PbsBackupStore.qml)"
+  if printf '%s\n' "$fn" | grep -qE 'XDG_CONFIG_HOME|configHome'; then
+    printf '  ok    openConfig honors XDG_CONFIG_HOME\n'
+  else
+    printf '  FAIL  openConfig does not honor XDG_CONFIG_HOME\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
 # Run all tests.
 main() {
   printf 'omarchy-pbs-backup tests\n'
@@ -528,6 +544,7 @@ main() {
   test_systemd_units_mode_644
   test_openlog_picks_most_recent
   test_openlog_wired_in_panel
+  test_openconfig_xdg_config_home
   printf -- '------------------------\n'
   printf '%d checks run, %d failed\n' "$TESTS_RUN" "$TESTS_FAILED"
   [ "$TESTS_FAILED" = "0" ]
