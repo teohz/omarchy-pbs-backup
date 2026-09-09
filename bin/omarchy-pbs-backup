@@ -939,17 +939,15 @@ cmd_ls() {
   local entries_json entries_count truncated
   entries_json="$(cd "$target" && find . -mindepth 1 -maxdepth 1 -printf '%y\0%f\0%s\0' \
     | jq -Rs --argjson cap "$LS_ENTRY_CAP" '
-        split("\u0000")
-        | {rows: .}
-        | reduce range(0; length) as $i ({}; . + {
-            ($i | tostring): {
-              type: (.[$i] | if . == "d" then "dir" elif . == "l" then "link" else "file" end),
-              name: .[$i+1],
-              size: (if .[$i] == "d" then null else (.[$i+2] | tonumber? // 0) end),
-              path: (if .[$i] == "d" then .[$i+1] + "/" else .[$i+1] end)
-            }
-          })
-        | [.[range(0; length; 3)]]
+        # Bind the split rows once and index that — don'\''t try to index
+        # the accumulator by a numeric key (.[$i] errors on `{}` with
+        # "Cannot index object with number (0)").
+        split("\u0000") | .[:-1] as $rows
+        | [range(0; ($rows | length); 3) as $start |
+            {type: ($rows[$start] | if . == "d" then "dir" elif . == "l" then "link" else "file" end),
+             name: $rows[$start+1],
+             size: (if $rows[$start] == "d" then null else ($rows[$start+2] | tonumber? // 0) end),
+             path: (if $rows[$start] == "d" then $rows[$start+1] + "/" else $rows[$start+1] end)}]
         | map(select(.name != null))
         | {entries: .[0:$cap], total: length, truncated: (length > $cap)}'
   )" || die "could not list directory"
@@ -1007,10 +1005,18 @@ cmd_restore() {
     restore_args+=(--pattern "$OPT_PATTERN")
   fi
 
-  if pbs_run "${restore_args[@]}" >>"$LOG_FILE" 2>&1; then
+  # cmd_restore is called from the QML where open_log hasn't run; the
+  # script-wide LOG_FILE is empty and `>>""` would fail with
+  # "No such file or directory". Always open our own log so the QML
+  # gets a meaningful error tail on failure.
+  local restore_log="$dir/$(date +%Y-%m-%d_%H%M%S).log"
+  : > "$restore_log"
+  chmod 600 -- "$restore_log"
+
+  if pbs_run "${restore_args[@]}" >>"$restore_log" 2>&1; then
     jq -nc --arg t "$dest" '{ok:true, target:$t}'
   else
-    local err; err="$(tail -n 5 "$LOG_FILE" 2>/dev/null || true)"
+    local err; err="$(tail -n 5 "$restore_log" 2>/dev/null || true)"
     [ -n "$err" ] || err="restore failed"
     jq -nc --arg e "$err" '{ok:false, error:$e}'
   fi

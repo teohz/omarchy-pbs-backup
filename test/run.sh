@@ -925,6 +925,51 @@ test_cmd_ls_auto_mounts() {
   TESTS_RUN=$((TESTS_RUN + 1))
 }
 
+# R2 fix: cmd_ls's jq pipeline tried to index the reduce accumulator by
+# a numeric key (`.[$i]` with `$i` as int) — that errors out with
+# "Cannot index object with number (0)" on the first iteration because
+# `.[0]` on `{}` is invalid. The fix binds the split rows to a local
+# variable and indexes that instead.
+test_cmd_ls_jq_does_not_index_accumulator() {
+  local fn
+  fn="$(awk '/^cmd_ls\(\)/,/^}/' "$SCRIPT")"
+  # Extract the jq filter: the multi-line jq string inside cmd_ls.
+  # The block starts at the line containing `split(` and ends at the
+  # line ending with a closing single quote (bash syntax, not part of
+  # the jq program). Strip the trailing quote before passing to jq.
+  local jq_block
+  jq_block="$(printf '%s\n' "$fn" | awk '
+    /split\(/ { in_block=1 }
+    in_block { print }
+    in_block && /'\''$/ { in_block=0 }
+  ' | sed 's/'\''$//')"
+  if [ -z "$jq_block" ]; then
+    printf '  FAIL  could not extract jq filter from cmd_ls\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    TESTS_RUN=$((TESTS_RUN + 1))
+    return
+  fi
+  # Run the filter against canned find output (3 directories). Shell
+  # variables can't hold NUL, so we materialise the canned input in a
+  # tmp file and pipe from there.
+  local canned
+  canned="$(mktemp)"
+  printf 'd\0restic\00\0d\0testing\00\0d\0lost+found\00\0' > "$canned"
+  local out
+  out="$(jq -Rs --argjson cap 500 "$jq_block" < "$canned" 2>&1)"
+  rm -f -- "$canned"
+  if printf '%s' "$out" | grep -q 'Cannot index object'; then
+    printf '  FAIL  cmd_ls jq errors on canned listing: %s\n' "$out"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  elif ! printf '%s' "$out" | grep -q '"name": *"restic"'; then
+    printf '  FAIL  cmd_ls jq did not return expected entries: %s\n' "$out"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  else
+    printf '  ok    cmd_ls jq produces a valid listing\n'
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
 # Run all tests.
 main() {
   printf 'omarchy-pbs-backup tests\n'
@@ -971,6 +1016,7 @@ main() {
   test_cmd_restore_unique_dest
   test_stale_progress_seconds_at_least_30
   test_cmd_ls_auto_mounts
+  test_cmd_ls_jq_does_not_index_accumulator
   printf -- '------------------------\n'
   printf '%d checks run, %d failed\n' "$TESTS_RUN" "$TESTS_FAILED"
   [ "$TESTS_FAILED" = "0" ]
