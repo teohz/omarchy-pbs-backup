@@ -1387,9 +1387,16 @@ JSON
         printf 'Wrote %s. Open it in the editor and replace the CHANGEME- placeholders.\n' "$CONFIG_FILE" >&2
       fi
 
-      omarchy-launch-editor -- "$CONFIG_FILE" 2>/dev/null \
-        || xdg-open "$CONFIG_FILE" >/dev/null 2>&1 \
-        || printf 'Open %s in your editor.\n' "$CONFIG_FILE"
+      # Detach whichever opener we pick: the CLI returns immediately so
+      # the QML createProc's onStreamFinished can fire and call
+      # refresh/openConfig. A synchronous editor would wedge the widget
+      # until the user closed it.
+      if command -v omarchy-launch-editor >/dev/null 2>&1; then
+        ( setsid omarchy-launch-editor -- "$CONFIG_FILE" </dev/null >/dev/null 2>&1 & )
+      else
+        ( setsid xdg-open "$CONFIG_FILE" >/dev/null 2>&1 & ) \
+          || printf 'Open %s in your editor.\n' "$CONFIG_FILE" >&2
+      fi
       ;;
     *)
       die "usage: config create"

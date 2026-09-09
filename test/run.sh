@@ -569,6 +569,47 @@ test_confirm_cancel_clears_target() {
   TESTS_RUN=$((TESTS_RUN + 1))
 }
 
+# H5 fix: cmd_config create used to run omarchy-launch-editor inline,
+# which wedged the QML createProc until the user closed their editor.
+# After the fix the editor must be detached so the CLI returns
+# immediately. The regression test runs cmd_config create with a fake
+# omarchy-launch-editor that sleeps for 30s; the CLI must exit in
+# under 5s.
+test_cmd_config_create_detaches_editor() {
+  setup_isolated_home
+  mkdir -p -- "$XDG_CONFIG_HOME/omarchy-pbs-backup"
+  cp "$FIXTURES/config-valid.json" "$XDG_CONFIG_HOME/omarchy-pbs-backup/config.json"
+  local fake_bin="$tmp/fakebin"
+  mkdir -p -- "$fake_bin"
+  cat > "$fake_bin/omarchy-launch-editor" <<'SH'
+#!/usr/bin/env bash
+sleep 30
+SH
+  chmod +x -- "$fake_bin/omarchy-launch-editor"
+
+  local start end elapsed
+  start="$(date +%s)"
+  PATH="$fake_bin:$PATH" "$SCRIPT" config create >/dev/null 2>&1
+  local code=$?
+  end="$(date +%s)"
+  elapsed=$((end - start))
+  # The fake editor sleeps in the background; kill any remaining process
+  # group before removing the tmp dir so nothing races.
+  pkill -P $$ -f 'omarchy-launch-editor' 2>/dev/null || true
+  rm -rf -- "$tmp"
+
+  if [ "$elapsed" -ge 5 ]; then
+    printf '  FAIL  cmd_config create took %ds (editor blocks the CLI)\n' "$elapsed"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  else
+    printf '  ok    cmd_config create returns in %ds (editor detached)\n' "$elapsed"
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+
+  # Should also exit cleanly, not propagate the editor's failure.
+  assert_eq "cmd_config create → exit 0" "0" "$code"
+}
+
 # Run all tests.
 main() {
   printf 'omarchy-pbs-backup tests\n'
@@ -601,6 +642,7 @@ main() {
   test_openconfig_xdg_config_home
   test_load_archives_dispatches
   test_confirm_cancel_clears_target
+  test_cmd_config_create_detaches_editor
   printf -- '------------------------\n'
   printf '%d checks run, %d failed\n' "$TESTS_RUN" "$TESTS_FAILED"
   [ "$TESTS_FAILED" = "0" ]
