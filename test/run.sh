@@ -117,14 +117,20 @@ test_status_valid_config_no_state() {
 
 test_snapshots_json_parsing() {
   # Feed the snapshots JSON shape into jq the same way cmd_snapshots does,
-  # and verify the field shape that goes to the widget.
-  local out; out="$(jq -c '{ok:true, snapshots:([.[] | {id: ("\(.["backup-type"] // "host")/\(.["backup-id"])/\(.time)"),
-                                 short_id: .["backup-id"],
-                                 time: .time,
-                                 size: .size}] | reverse)}' \
+  # and verify the field shape that goes to the widget. PBS uses
+  # `backup-time` (epoch seconds) rather than `time`; the script converts
+  # via `gmtime | strftime` to ISO 8601.
+  local out; out="$(jq -c '
+    {ok: true, snapshots: ([.[] | {
+      id: ((.["backup-type"] // "host") + "/" + .["backup-id"] + "/" + (.["backup-time"] | gmtime | strftime("%Y-%m-%dT%H:%M:%SZ"))),
+      short_id: .["backup-id"],
+      time: (.["backup-time"] | gmtime | strftime("%Y-%m-%dT%H:%M:%SZ")),
+      size: .size
+    }] | reverse)}' \
     < "$FIXTURES/snapshot-list.json" 2>&1)"
   assert_contains "snapshots → id encoded" "host/external-drive/" "$out"
-  assert_contains "snapshots → time carried" "2026-09-08T03:00:14Z" "$out"
+  # 1788939003 → 2026-09-09T07:30:03Z
+  assert_contains "snapshots → time carried" "2026-09-09T07:30:03Z" "$out"
   assert_contains "snapshots → size carried" '12345678901' "$out"
 }
 
@@ -221,6 +227,41 @@ test_backup_no_json_flag() {
     TESTS_FAILED=$((TESTS_FAILED + 1))
   else
     printf '  ok    backup_args do not pass --json to backup\n'
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
+test_pbs_group_helper() {
+  # `snapshot list` and `prune` take <group> = <type>/<id>, not just <id>.
+  # The script used to pass the bare backup-id to these, which PBS rejected
+  # with "unable to parse backup group path 'X'". The pbs_group helper
+  # prepends "host/" — verify it exists and is wired into the relevant call
+  # sites.
+  local helper
+  helper="$(awk '/^pbs_group\(\)/,/^}/' "$SCRIPT")"
+  [ -n "$helper" ] || { printf '  FAIL  pbs_group helper missing\n'; TESTS_FAILED=$((TESTS_FAILED + 1)); TESTS_RUN=$((TESTS_RUN + 1)); return; }
+  printf '  ok    pbs_group helper defined\n'
+  TESTS_RUN=$((TESTS_RUN + 1))
+
+  # Run it standalone and check the output.
+  local out; out="$(bash -c "$helper; pbs_group backup")"
+  assert_eq "pbs_group backup → host/backup" "host/backup" "$out"
+
+  # Snapshot list and prune calls must use the helper, not bare $bid.
+  # Grep for the specific bad pattern: the variable name $bid used directly
+  # in the argument (instead of $(pbs_group "$bid") which contains a `(`).
+  if grep -nE 'snapshot list "\$bid"' "$SCRIPT" >/dev/null 2>&1; then
+    printf '  FAIL  snapshot list called with bare $bid (missing host/ prefix)\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  else
+    printf '  ok    no bare-$bid snapshot list calls\n'
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+  if grep -nE '\bprune "\$bid"' "$SCRIPT" >/dev/null 2>&1; then
+    printf '  FAIL  prune called with bare $bid (missing host/ prefix)\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  else
+    printf '  ok    no bare-$bid prune calls\n'
   fi
   TESTS_RUN=$((TESTS_RUN + 1))
 }
@@ -330,6 +371,7 @@ main() {
   test_status_with_state_file
   test_state_dirs_outside_plugin_dir
   test_backup_no_json_flag
+  test_pbs_group_helper
   test_pbs_context_uses_repository_string
   test_snapshots_json_parsing
   test_snapshots_empty_list

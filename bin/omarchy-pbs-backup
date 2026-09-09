@@ -359,6 +359,17 @@ group_backup_id() {
   printf '%s' "$(sanitize_for_pbs_id "$base")"
 }
 
+# PBS distinguishes --backup-id (an identifier, used with `backup`) from
+# `<group>` (a positional argument, used with snapshot list / prune /
+# group-forget / change-owner). The group is `<type>/<id>`. Plugin v1 only
+# backs up `host` type data, so the group is always `host/<backup-id>`.
+# Passing just `<backup-id>` to prune/snapshot-list fails with
+# "unable to parse backup group path 'X'".
+pbs_group() {
+  local bid="$1"
+  printf 'host/%s' "$bid"
+}
+
 keep_value() {
   local key="$1" fallback="$2" value
   value="$(jq -r --arg k "$key" '.retention[$k] // empty' <<<"$GROUP_JSON" 2>/dev/null)"
@@ -743,7 +754,7 @@ cmd_check_reachable() {
   local name; name="$(cfg '.groups[0].name')"
   select_destination "$name"
   local bid; bid="$(group_backup_id)"
-  pbs_run snapshot list "$bid" \
+  pbs_run snapshot list "$(pbs_group "$bid")" \
     --output-format json >/dev/null 2>&1
 }
 
@@ -757,17 +768,20 @@ cmd_snapshots() {
   local bid out
   bid="$(group_backup_id)"
 
-  out="$(pbs_run snapshot list "$bid" --output-format json 2>/dev/null \
+  out="$(pbs_run snapshot list "$(pbs_group "$bid")" --output-format json 2>/dev/null \
     | head -c "$((SNAPSHOT_BYTE_CAP + 1))")"
   if over_byte_cap "$out" "$SNAPSHOT_BYTE_CAP"; then
     jq -nc '{ok:false, error:"snapshot list too large to read safely", snapshots:[]}'; return 0
   fi
   [ -n "$out" ] || { jq -nc '{ok:false, error:"could not read snapshots", snapshots:[]}'; return 0; }
 
-  jq -c '{ok:true, snapshots:([.[] | {id: ("\(.backup-type // "host")/\(.backup-id)/\(.time)"),
-                                 short_id: .["backup-id"],
-                                 time: .time,
-                                 size: .size}] | reverse)}' <<<"$out" 2>/dev/null ||
+  jq -c '
+    {ok: true, snapshots: ([.[] | {
+      id: ((.["backup-type"] // "host") + "/" + .["backup-id"] + "/" + (.["backup-time"] | gmtime | strftime("%Y-%m-%dT%H:%M:%SZ"))),
+      short_id: .["backup-id"],
+      time: (.["backup-time"] | gmtime | strftime("%Y-%m-%dT%H:%M:%SZ")),
+      size: .size
+    }] | reverse)}' <<<"$out" 2>/dev/null ||
     jq -nc '{ok:false, error:"unexpected snapshot output", snapshots:[]}'
 }
 
@@ -1048,6 +1062,13 @@ cmd_backup() {
 
   if [ "$OPT_DRY_RUN" = "1" ]; then
     log_line "DRY RUN: would run: proxmox-backup-client ${backup_args[*]}"
+    if [ "$(group '.prune_after_backup // true')" = "true" ]; then
+      log_line "DRY RUN: would run: proxmox-backup-client prune $(pbs_group "$bid") \
+        --keep-daily $(keep_value daily 7) \
+        --keep-weekly $(keep_value weekly 4) \
+        --keep-monthly $(keep_value monthly 12) \
+        --keep-yearly $(keep_value yearly 3)"
+    fi
     progress_write done backup 1 \
       "$(jq -nc '{percent:0.0, result:"dry-run"}')"
     log_line ""
@@ -1114,7 +1135,7 @@ run_prune() {
 
   log_line ""
   log_line "Pruning old snapshots of $bid..."
-  if ! pbs_run prune "$bid" \
+  if ! pbs_run prune "$(pbs_group "$bid")" \
         --keep-daily "$(keep_value daily 7)" \
         --keep-weekly "$(keep_value weekly 4)" \
         --keep-monthly "$(keep_value monthly 12)" \
@@ -1138,15 +1159,16 @@ record_status() {
   local repo_size=0
   if [ "$result" != "failed" ]; then
     local bid; bid="$(group_backup_id)"
+    local group; group="$(pbs_group "$bid")"
     local raw
-    raw="$(pbs_run snapshot list "$bid" --output-format json 2>/dev/null \
+    raw="$(pbs_run snapshot list "$group" --output-format json 2>/dev/null \
       | head -c "$((SNAPSHOT_BYTE_CAP + 1))" \
       | jq -r 'length' 2>/dev/null)" || raw=""
     snapshot_count="$(number_or "$raw" 0)"
 
     # PBS has no cheap "repo size" command on the client side; the per-group
     # size lives in snapshot list's `.size` field summed across snapshots.
-    raw="$(pbs_run snapshot list "$bid" --output-format json 2>/dev/null \
+    raw="$(pbs_run snapshot list "$group" --output-format json 2>/dev/null \
       | head -c "$((SNAPSHOT_BYTE_CAP + 1))" \
       | jq -r '[.[] | (.size // 0)] | add // 0' 2>/dev/null)" || raw=""
     repo_size="$(number_or "$raw" 0)"
@@ -1334,7 +1356,7 @@ cmd_config() {
 {
   "pbs": {
     "repository": "CHANGEME-user@pbs!backup@pbs-host.example.com:datastore-name",
-    "fingerprint": "CHANGEME-aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99:aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99",
+    "fingerprint": "CHANGEME-aa:aa:aa:aa:aa:aa:aa:aa:aa:aa:aa:aa:aa:aa:aa:aa:aa:aa:aa:aa:aa:aa:aa:aa:aa:aa:aa:aa:aa:aa:aa:aa",
     "change_detection_mode": "metadata"
   },
   "namespace": "CHANGEME-your-name/your-group",
