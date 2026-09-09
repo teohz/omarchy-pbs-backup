@@ -383,8 +383,13 @@ Panel {
             foreground: root.foreground
             fontFamily: root.fontFamily
             onClicked: {
+              // Fire-and-forget: xdg-open launches the user's default
+              // handler. Don't close the panel — the user might not
+              // see anything happen if their handler launches
+              // asynchronously (e.g. terminal editor in another
+              // workspace), and a closed panel + nothing visible is
+              // indistinguishable from "did nothing".
               PbsBackupStore.openLog()
-              root.close()
             }
           }
 
