@@ -158,6 +158,57 @@ test_status_with_state_file() {
   rm -rf -- "$tmp"
 }
 
+test_state_dirs_outside_plugin_dir() {
+  # The plugin code lives at PLUGIN_DIR (set inside the script as the parent
+  # of bin/). Config and state must NOT live under PLUGIN_DIR, otherwise
+  # `omarchy plugin update` (which `git pull`s the plugin dir) would clobber
+  # user data on every update.
+  #
+  # Verify three things by inspecting the script source:
+  #   1. CONFIG_DIR is rooted at XDG_CONFIG_HOME or $HOME/.config
+  #   2. STATE_DIR is rooted at XDG_STATE_HOME or $HOME/.local/state
+  #   3. Neither contains the plugin-name "omarchy-pbs-backup/plugins/"
+  #      (which would put it inside the plugin source dir).
+  local config_line; config_line="$(grep -n '^CONFIG_DIR=' "$SCRIPT" | head -1)"
+  local state_line; state_line="$(grep -n '^STATE_DIR=' "$SCRIPT" | head -1)"
+  local secret_line; secret_line="$(grep -n '^SECRET_FILE=' "$SCRIPT" | head -1)"
+
+  assert_contains "CONFIG_DIR uses XDG_CONFIG_HOME" \
+    "XDG_CONFIG_HOME" "$config_line"
+  assert_contains "CONFIG_DIR falls back to HOME/.config" \
+    "HOME/.config" "$config_line"
+  assert_contains "STATE_DIR uses XDG_STATE_HOME" \
+    "XDG_STATE_HOME" "$state_line"
+  assert_contains "STATE_DIR falls back to HOME/.local/state" \
+    "HOME/.local/state" "$state_line"
+  assert_contains "SECRET_FILE is anchored at CONFIG_DIR" \
+    'SECRET_FILE="$CONFIG_DIR' "$secret_line"
+
+  # The actual structural assertion: config and state directories must
+  # not include the "plugins/" segment (which is what omarchy uses to
+  # distinguish a plugin source from a plugin's user state).
+  if [[ "$config_line" == *"plugins/"* ]]; then
+    printf '  FAIL  CONFIG_DIR points under plugins/ (would be clobbered on update)\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  else
+    printf '  ok    CONFIG_DIR does not include plugins/ (update-safe)\n'
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+  if [[ "$state_line" == *"plugins/"* ]]; then
+    printf '  FAIL  STATE_DIR points under plugins/ (would be clobbered on update)\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  else
+    printf '  ok    STATE_DIR does not include plugins/ (update-safe)\n'
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+
+  # .gitignore must continue to keep config.json and .secret out of git,
+  # even if a future change accidentally stages them.
+  local gitignore; gitignore="$(cat "$REPO_ROOT/.gitignore")"
+  assert_contains ".gitignore excludes config.json" "config.json" "$gitignore"
+  assert_contains ".gitignore excludes .secret" ".secret" "$gitignore"
+}
+
 test_backup_no_json_flag() {
   # PBS `backup` has no --json output mode (the original time-machine plugin
   # used restic, which did). The script used to pass --json to
@@ -277,6 +328,7 @@ main() {
   test_groups_no_groups_field
   test_status_valid_config_no_state
   test_status_with_state_file
+  test_state_dirs_outside_plugin_dir
   test_backup_no_json_flag
   test_pbs_context_uses_repository_string
   test_snapshots_json_parsing
