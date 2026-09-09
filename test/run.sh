@@ -402,6 +402,30 @@ test_record_status_calls_snapshot_list_once() {
   TESTS_RUN=$((TESTS_RUN + 1))
 }
 
+# M4 fix: cmd_groups used a local named `display` to hold the repository
+# URL, which read like the group's display name. Rename to `repo`.
+# The JSON output field `repository_display` is the correct contract name
+# for what this holds.
+test_cmd_groups_repo_naming() {
+  local fn
+  fn="$(awk '/^cmd_groups\(\)/,/^}/' "$SCRIPT")"
+  if printf '%s\n' "$fn" | grep -qE '^[[:space:]]+display='; then
+    printf '  FAIL  cmd_groups still assigns to misnamed `display` local\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  else
+    printf '  ok    cmd_groups does not assign to misnamed `display`\n'
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+
+  if ! printf '%s\n' "$fn" | grep -qE '^[[:space:]]+repo='; then
+    printf '  FAIL  cmd_groups does not assign to `repo` local\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  else
+    printf '  ok    cmd_groups assigns the repository URL to `repo`\n'
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
 # Run all tests.
 main() {
   printf 'omarchy-pbs-backup tests\n'
@@ -426,6 +450,7 @@ main() {
   test_key_set_writes_secret
   test_groups_table_no_duplicate_count
   test_record_status_calls_snapshot_list_once
+  test_cmd_groups_repo_naming
   printf -- '------------------------\n'
   printf '%d checks run, %d failed\n' "$TESTS_RUN" "$TESTS_FAILED"
   [ "$TESTS_FAILED" = "0" ]

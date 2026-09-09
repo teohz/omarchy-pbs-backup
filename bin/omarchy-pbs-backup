@@ -660,23 +660,23 @@ cmd_groups() {
 
   JSON_MODE=1
   load_config
-  local out name backup_id display schedule
+  local out name backup_id repo schedule
 
   out='[]'
   while IFS= read -r name; do
     [ -n "$name" ] || continue
     select_destination "$name"
     backup_id="$(group_backup_id)"
-    display="$(cfg '.pbs.repository // empty')"
+    repo="$(cfg '.pbs.repository // empty')"
     schedule="$(group '.schedule // empty')"
     out="$(jq -c \
       --arg name "$name" \
       --arg label "$(group_label)" \
       --arg backup_id "$backup_id" \
-      --arg display "$display" \
+      --arg repo "$repo" \
       --arg schedule "$schedule" \
       '. + [{name:$name, display_name:$label, backup_id:$backup_id,
-             repository_display:$display,
+             repository_display:$repo,
              schedule:(if $schedule == "" then null else $schedule end)}]' <<<"$out")"
   done < <(cfg '.groups[].name')
 
