@@ -69,6 +69,9 @@ Panel {
   onOpenedChanged: {
     if (!opened) {
       root.browsing = false
+      // Release the FUSE mount. Fire-and-forget: unmount() drops its
+      // own result, and the panel is closing anyway.
+      PbsBackupStore.unmount()
       return
     }
     PbsBackupStore.refresh()

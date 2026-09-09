@@ -610,6 +610,27 @@ SH
   assert_eq "cmd_config create → exit 0" "0" "$code"
 }
 
+# H2 fix: Panel.qml must call PbsBackupStore.unmount() when the panel
+# closes. The README and the PbsBackupStore header comment both promise
+# this; the code didn't deliver, so the FUSE mount survived every
+# panel open/close cycle.
+test_panel_close_unmounts() {
+  # Extract the onOpenedChanged handler — everything from the line that
+  # introduces it up to the next blank line.
+  local fn
+  fn="$(awk '
+    /onOpenedChanged:/ { inside=1 }
+    inside { print; if (NF == 0 || /^[[:space:]]*[}]/) exit }
+  ' Panel.qml)"
+  if printf '%s\n' "$fn" | grep -q 'PbsBackupStore.unmount'; then
+    printf '  ok    Panel.qml calls PbsBackupStore.unmount on close\n'
+  else
+    printf '  FAIL  Panel.qml does not call PbsBackupStore.unmount on close\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
 # Run all tests.
 main() {
   printf 'omarchy-pbs-backup tests\n'
@@ -643,6 +664,7 @@ main() {
   test_load_archives_dispatches
   test_confirm_cancel_clears_target
   test_cmd_config_create_detaches_editor
+  test_panel_close_unmounts
   printf -- '------------------------\n'
   printf '%d checks run, %d failed\n' "$TESTS_RUN" "$TESTS_FAILED"
   [ "$TESTS_FAILED" = "0" ]
