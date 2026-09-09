@@ -2,6 +2,9 @@
 config.json
 .secret
 
+# Working notes — local-only, never pushed (see ISSUES.md)
+ISSUES.md
+
 # State directory layout (created at runtime by the CLI).
 state/
 
