@@ -55,9 +55,11 @@ group and share chunks.
 
 Click **Restore Files…** in the panel. The plugin mounts the chosen
 archive via PBS's FUSE backend at
-`~/.local/state/omarchy-pbs-backup/mounts/<group>/<snapshot-id>/`. Each
-folder click is a single `readdir` on that mount; restoring a file or
-folder calls `proxmox-backup-client restore <snap> <archive> ~/Restored/`
+`~/.local/state/omarchy-pbs-backup/mounts/<group>/<snapshot-id-with-hyphens>/`
+(slashes in the snapshot id are flattened to `-` so each snapshot lives
+in a single flat directory). Each folder click is a single `readdir`
+on that mount; restoring a file or folder calls
+`proxmox-backup-client restore <snap> <archive> ~/Restored/`
 (without `--overwrite`, so it fails loudly if anything already exists).
 
 Two affordances are exposed at the bottom of the restore panel:
@@ -147,7 +149,7 @@ users who prefer PBS's own interactive UI over the bar widget's.
 | `~/.local/state/omarchy-pbs-backup/status.json` | Per-group last-run, snapshot_count, repo_size_bytes. |
 | `~/.local/state/omarchy-pbs-backup/progress-<group>.json` | Live progress (10s TTL on the bar widget's "running" detection). |
 | `~/.local/state/omarchy-pbs-backup/logs/<group>/<date>.log` | Per-run log files, 30-day retention. |
-| `~/.local/state/omarchy-pbs-backup/mounts/<group>/<snapshot-id>/` | FUSE mount points, unmounted on panel close. |
+| `~/.local/state/omarchy-pbs-backup/mounts/<group>/<snapshot-id-with-hyphens>/` | FUSE mount points; the snapshot id's slashes are flattened to `-` so each lives in one flat directory. Unmounted on panel close. |
 | `~/.config/systemd/user/omarchy-pbs-backup@.service` | Template service, one per group. |
 | `~/.config/systemd/user/omarchy-pbs-backup@<group>.timer` | Per-group timer. |
 | `~/.config/systemd/user/omarchy-pbs-backup-failed@.service` | `OnFailure=` hook, sends a notification. |

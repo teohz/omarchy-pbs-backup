@@ -657,6 +657,32 @@ test_group_detail_no_data_added_bytes() {
   TESTS_RUN=$((TESTS_RUN + 1))
 }
 
+# D4 fix: README showed `mounts/<group>/<snapshot-id>/` but the script's
+# mount_path_for replaces slashes with hyphens so the on-disk layout is
+# flat (no nested dirs). Update README to match.
+test_readme_mount_path_matches_script() {
+  # Extract mount_path_for from the script to see what it actually produces.
+  local fn
+  fn="$(awk '
+    /^mount_path_for\(\)/ { inside=1 }
+    inside { print }
+    inside && /^}$/ { inside=0 }
+  ' "$SCRIPT")"
+  # If the script replaces / with -, the README must not show <snapshot-id>/
+  # as a literal slash.
+  if printf '%s\n' "$fn" | grep -qE "tr '/' '-'"; then
+    if grep -qE 'mounts/<group>/<snapshot-id>/' README.md; then
+      printf '  FAIL  README still shows literal slashes; script flattens to hyphens\n'
+      TESTS_FAILED=$((TESTS_FAILED + 1))
+    else
+      printf '  ok    README mount-path layout matches script (hyphens)\n'
+    fi
+  else
+    printf '  ok    mount_path_for keeps slashes; README already correct\n'
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
 # Run all tests.
 main() {
   printf 'omarchy-pbs-backup tests\n'
@@ -692,6 +718,7 @@ main() {
   test_cmd_config_create_detaches_editor
   test_panel_close_unmounts
   test_group_detail_no_data_added_bytes
+  test_readme_mount_path_matches_script
   printf -- '------------------------\n'
   printf '%d checks run, %d failed\n' "$TESTS_RUN" "$TESTS_FAILED"
   [ "$TESTS_FAILED" = "0" ]
