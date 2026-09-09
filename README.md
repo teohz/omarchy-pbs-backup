@@ -112,6 +112,7 @@ users who prefer PBS's own interactive UI over the bar widget's.
       "source": "/mnt/external-drive",
       "schedule": "Sun *-*-* 03:00:00",
       "randomized_delay": "10m",
+      "namespace": null,
       "backup_id": null,
       "excludes": [
         "*/.cache/",
@@ -129,16 +130,21 @@ users who prefer PBS's own interactive UI over the bar widget's.
 | `pbs.repository` | Full `PBS_REPOSITORY` string. Carries the server, datastore, namespace, and auth identity (`user@realm` for password auth, `user@realm!tokenname` for an API token). Same shape your `pbs-adhoc-backup.sh` uses. |
 | `pbs.fingerprint` | TLS cert fingerprint (sha256). Required for self-signed PBS certs. |
 | `pbs.change_detection_mode` | `legacy`, `data`, or `metadata`. Default `metadata`. |
-| `namespace` | PBS namespace. Top-level for now; per-group override may come later. |
-| `groups[].name` | Identifier — names the systemd unit, log dir, and restore browser slot. |
+| `namespace` | Top-level PBS namespace. Used as the default for every group; per-group overrides below. |
+| `groups[].namespace` | Per-group PBS namespace override. Falls back to the top-level `namespace`. Use this to put different groups under different PBS namespaces. |
+| `groups[].name` | Identifier — names the systemd unit, log dir, and restore browser slot. Also the default PBS backup-id. |
 | `groups[].display_name` | Human label shown in the bar panel. |
 | `groups[].source` | Absolute path to back up. |
 | `groups[].schedule` | systemd `OnCalendar` value. Empty = run on demand only. |
 | `groups[].randomized_delay` | systemd `RandomizedDelaySec` for the timer. |
-| `groups[].backup_id` | Optional override for the PBS `--backup-id`. Defaults to `sanitize_for_pbs_id "$(basename source)"`. |
+| `groups[].backup_id` | Optional override for the PBS `--backup-id`. Defaults to the group's `name` (sanitised). The previous behaviour — `basename(source)` — is gone, because two configs with similar source paths used to collide on the PBS side and the storage name had no relation to the name you configured. |
 | `groups[].excludes` | Array of glob patterns, passed as repeated `--exclude`. |
 | `groups[].retention` | `keep-daily` / `keep-weekly` / `keep-monthly` / `keep-yearly` integers. |
 | `groups[].prune_after_backup` | `true` (default) runs `prune` after each successful backup; `false` defers retention to PBS admin. |
+
+The actual `backup_id` and `namespace` used for each backup are written
+to `status.json`, so `omarchy-pbs-backup status --json` shows where on
+PBS each group's snapshots will land.
 
 ## State directories
 

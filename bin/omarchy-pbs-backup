@@ -1389,6 +1389,7 @@ cmd_config() {
       "source": "/mnt/external-drive",
       "schedule": "Sun *-*-* 03:00:00",
       "randomized_delay": "10m",
+      "namespace": null,
       "backup_id": null,
       "excludes": [
         "*/.cache/",
