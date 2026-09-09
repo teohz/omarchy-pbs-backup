@@ -814,6 +814,24 @@ test_record_status_records_identity() {
   TESTS_RUN=$((TESTS_RUN + 1))
 }
 
+# M5 fix: groups_table format string left no gap between columns at the
+# truncation boundary. The header printf must use a separator (a pipe,
+# or at least two spaces) between adjacent format specs so a 22-char
+# truncated label can't touch the next column.
+test_groups_table_column_separators() {
+  local fn
+  fn="$(awk '/^groups_table\(\)/,/^}/' "$SCRIPT")"
+  # Match either "  | " (with pipe) or "  " (two+ spaces) between
+  # adjacent format specs. Single space " " is what the bug had.
+  if printf '%s\n' "$fn" | grep -qE "%-[0-9]+s( \| |  +)%-[0-9]+s"; then
+    printf '  ok    groups_table uses clear column separators\n'
+  else
+    printf '  FAIL  groups_table columns may run flush at truncation boundary\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
 # Run all tests.
 main() {
   printf 'omarchy-pbs-backup tests\n'
@@ -854,6 +872,7 @@ main() {
   test_group_backup_id_defaults_to_name
   test_pbs_context_honors_per_group_namespace
   test_record_status_records_identity
+  test_groups_table_column_separators
   printf -- '------------------------\n'
   printf '%d checks run, %d failed\n' "$TESTS_RUN" "$TESTS_FAILED"
   [ "$TESTS_FAILED" = "0" ]

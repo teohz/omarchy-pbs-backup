@@ -623,8 +623,8 @@ groups_table() {
   units="no"
   readable_file "$SYSTEMD_DIR/omarchy-pbs-backup@.service" && units="yes"
 
-  printf '%-22s %-22s %-38s %-14s %s\n' NAME LABEL WHERE SCHEDULE "LAST BACKUP"
-  printf '%-22s %-22s %-38s %-14s %s\n' ---------------------- ---------------------- \
+  printf '%-22s  %-22s  %-38s  %-14s  %s\n' NAME LABEL WHERE SCHEDULE "LAST BACKUP"
+  printf '%-22s  %-22s  %-38s  %-14s  %s\n' ---------------------- ---------------------- \
     -------------------------------------- -------------- -----------
 
   while IFS= read -r name; do
