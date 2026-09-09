@@ -846,6 +846,19 @@ test_restore_header_uses_layout() {
   TESTS_RUN=$((TESTS_RUN + 1))
 }
 
+# M7 fix: sourceLabel2 was an invisible Text used as a layout probe for
+# the archive-picker dropdown width. Replace with a RowLayout so the
+# archive label and dropdown size each other naturally.
+test_no_invisible_layout_probes() {
+  if grep -nE 'sourceLabel2|visible:[[:space:]]*false' RestoreBrowser.qml >/dev/null 2>&1; then
+    printf '  FAIL  invisible layout probes still present in RestoreBrowser\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  else
+    printf '  ok    no invisible layout probes in RestoreBrowser\n'
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
 # Run all tests.
 main() {
   printf 'omarchy-pbs-backup tests\n'
@@ -888,6 +901,7 @@ main() {
   test_record_status_records_identity
   test_groups_table_column_separators
   test_restore_header_uses_layout
+  test_no_invisible_layout_probes
   printf -- '------------------------\n'
   printf '%d checks run, %d failed\n' "$TESTS_RUN" "$TESTS_FAILED"
   [ "$TESTS_FAILED" = "0" ]

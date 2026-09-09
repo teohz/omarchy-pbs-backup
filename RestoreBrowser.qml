@@ -320,13 +320,13 @@ FocusScope {
     }
 
     // --- archive picker -------------------------------------------------
-    Row {
+    RowLayout {
       width: parent.width
       spacing: Style.space(8)
       visible: root.archiveName !== "" || PbsBackupStore.archives.length > 1
 
       Text {
-        anchors.verticalCenter: parent.verticalCenter
+        Layout.alignment: Qt.AlignVCenter
         text: "Archive"
         textFormat: Text.PlainText
         color: root.dim
@@ -335,8 +335,8 @@ FocusScope {
       }
 
       Dropdown {
-        width: parent.width - sourceLabel2.implicitWidth - parent.spacing
-        anchors.verticalCenter: parent.verticalCenter
+        Layout.fillWidth: true
+        Layout.alignment: Qt.AlignVCenter
         label: ""
         showLabel: false
         foreground: root.foreground
@@ -356,12 +356,6 @@ FocusScope {
           root.takeFocus()
         }
         onPopupOpenChanged: if (!popupOpen) root.takeFocus()
-      }
-
-      Text {
-        id: sourceLabel2
-        visible: false
-        text: ""
       }
     }
 
