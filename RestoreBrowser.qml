@@ -234,6 +234,12 @@ FocusScope {
 
   function activateCursor() {
     if (cursorIndex < 0 || cursorIndex >= rows.length) return
+    // Ignore clicks while a listing is loading. Without this guard a
+    // click on a row from a previous (still-visible) listing races
+    // against the in-flight lsProc, the result is a cmd_ls call for
+    // a path the FUSE mount no longer exposes, and the user sees
+    // "path does not exist in snapshot".
+    if (PbsBackupStore.listBusy) return
     var row = rows[cursorIndex]
     if (String(row.type) === "up") root.goUp()
     else if (String(row.type) === "dir") root.enterDirectory(String(row.path))
