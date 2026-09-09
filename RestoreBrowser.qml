@@ -540,15 +540,41 @@ FocusScope {
     // Mount hint: lets a power user open the FUSE mount in their file
     // manager and use cp / find / grep from a terminal without going through
     // the restore dialog.
-    Text {
+    RowLayout {
       width: parent.width
       visible: PbsBackupStore.mountPoint !== ""
-      text: "Mounted at " + PbsBackupStore.mountPoint
-      textFormat: Text.PlainText
-      elide: Text.ElideLeft
-      color: root.dim
-      font.family: root.fontFamily
-      font.pixelSize: Style.font.caption
+      spacing: Style.space(8)
+
+      Text {
+        Layout.fillWidth: true
+        text: "Mounted at " + PbsBackupStore.mountPoint
+        textFormat: Text.PlainText
+        elide: Text.ElideLeft
+        color: root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+      }
+
+      // Open the mount in the user's file manager so they can verify
+      // the snapshot contents (and mtimes, etc.) before committing to
+      // a restore — the plugin's listing shows names and sizes, but
+      // the file manager shows everything.
+      Text {
+        Layout.alignment: Qt.AlignVCenter
+        text: "Open in File Manager\u2026"
+        textFormat: Text.PlainText
+        color: root.accent
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        MouseArea {
+          anchors.fill: parent
+          cursorShape: Qt.PointingHandCursor
+          onClicked: {
+            PbsBackupStore.openMountPoint()
+            root.takeFocus()
+          }
+        }
+      }
     }
 
     // --- restore ---------------------------------------------------------

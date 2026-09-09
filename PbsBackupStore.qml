@@ -241,6 +241,17 @@ Singleton {
 
   Process { id: logProc }
 
+  // Open the current FUSE mount in the user's file manager so they can
+  // inspect the actual snapshot contents before committing to a
+  // restore. Mount path comes from cmd_ls's payload (`mount_point`).
+  function openMountPoint() {
+    if (!mountPoint) return
+    mountProc.command = ["xdg-open", String(mountPoint)]
+    mountProc.running = true
+  }
+
+  Process { id: mountProc }
+
   // --- snapshots --------------------------------------------------------
   // Which group the restore browser is looking at. Separate from anything
   // the main panel does: browsing another group's history is reading, and
