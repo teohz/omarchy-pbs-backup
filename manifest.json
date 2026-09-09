@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "teohz.pbs-backup",
+  "name": "PBS Backup",
+  "version": "0.1.0",
+  "author": "teohz",
+  "description": "Scheduled Proxmox Backup Server backups with a snapshot browser in the bar",
+  "homepage": "https://github.com/teohz/omarchy-pbs-backup",
+  "license": "MIT",
+  "kinds": ["bar-widget"],
+  "entryPoints": { "barWidget": "Panel.qml" },
+  "barWidget": {
+    "displayName": "PBS Backup",
+    "description": "Scheduled Proxmox Backup Server backups with a snapshot browser",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

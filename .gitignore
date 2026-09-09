@@ -1,0 +1,11 @@
+# Local secrets and state — never committed.
+config.json
+.secret
+
+# State directory layout (created at runtime by the CLI).
+state/
+
+# Editor backup files
+*~
+*.swp
+*.bak

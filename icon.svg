@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  fa-database outline, from Font Awesome Free (https://fontawesome.com).
+  Licensed CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/).
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512" fill="currentColor">
+  <!-- cylinder body: top ellipse, two side walls, bottom ellipse -->
+  <path d="M64 96c0-35.3 100.6-64 224-64s224 28.7 224 64-100.6 64-224 64S64 131.3 64 96z"/>
+  <path d="M64 96v224c0 35.3 100.6 64 224 64s224-28.7 224-64V96c0 35.3-100.6 64-224 64S64 131.3 64 96z"/>
+  <!-- three horizontal stripes (storage layers) -->
+  <path d="M64 192c0 35.3 100.6 64 224 64s224-28.7 224-64V192c0 35.3-100.6 64-224 64S64 227.3 64 192z" opacity="0.85"/>
+  <path d="M64 288c0 35.3 100.6 64 224 64s224-28.7 224-64V288c0 35.3-100.6 64-224 64S64 323.3 64 288z" opacity="0.7"/>
+  <path d="M480 416c0 35.3-100.6 64-224 64s-224-28.7-224-64V416c0 35.3 100.6 64 224 64s224-28.7 224-64z" opacity="0.55"/>
+</svg>

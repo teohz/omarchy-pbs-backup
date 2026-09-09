@@ -1,0 +1,18 @@
+{
+  "pbs": {
+    "repository": "backup@pbs!backup@pbs-host.example.com:datastore"
+  },
+  "namespace": "teohz/core",
+  "groups": [
+    {
+      "name": "external-drive",
+      "source": "/mnt/external-drive",
+      "schedule": "Sun *-*-* 03:00:00"
+    },
+    {
+      "name": "external-drive",
+      "source": "/mnt/other-drive",
+      "schedule": "Mon *-*-* 03:00:00"
+    }
+  ]
+}

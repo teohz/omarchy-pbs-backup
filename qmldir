@@ -1,0 +1,4 @@
+singleton PbsBackupStore 1.0 PbsBackupStore.qml
+RestoreBrowser 1.0 RestoreBrowser.qml
+RestoreRow 1.0 RestoreRow.qml
+MenuRow 1.0 MenuRow.qml

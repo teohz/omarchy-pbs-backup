@@ -1,0 +1,17 @@
+[
+  {
+    "filename": "index.json",
+    "filetype": "fidx",
+    "size": 4096
+  },
+  {
+    "filename": "catalog.pcat1",
+    "filetype": "fidx",
+    "size": 32768
+  },
+  {
+    "filename": "external-drive.pxar",
+    "filetype": "pxar",
+    "size": 12345678901
+  }
+]

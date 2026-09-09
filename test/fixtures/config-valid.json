@@ -1,0 +1,24 @@
+{
+  "pbs": {
+    "repository": "backup@pbs!backup@pbs-host.example.com:datastore",
+    "auth_id": "backup@pbs",
+    "fingerprint": "aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99:aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99",
+    "change_detection_mode": "metadata"
+  },
+  "namespace": "teohz/core",
+  "groups": [
+    {
+      "name": "external-drive",
+      "display_name": "External drive",
+      "source": "/mnt/external-drive",
+      "schedule": "Sun *-*-* 03:00:00",
+      "randomized_delay": "10m",
+      "backup_id": null,
+      "excludes": [
+        "*/.cache/"
+      ],
+      "retention": { "daily": 7, "weekly": 4, "monthly": 12, "yearly": 3 },
+      "prune_after_backup": true
+    }
+  ]
+}

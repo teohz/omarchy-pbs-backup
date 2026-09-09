@@ -1,0 +1,252 @@
+#!/usr/bin/env bash
+# Shell tests for omarchy-pbs-backup's JSON contracts.
+#
+# Each test sets up an isolated XDG_CONFIG_HOME / XDG_STATE_HOME, drops a
+# config in place, and shells out to the CLI. proxmox-backup-client is NOT
+# required for these tests -- they exercise the parts of the CLI that don't
+# touch PBS (status, config validation, JSON parsing of canned PBS output via
+# fixtures).
+#
+# Run from anywhere:
+#   ./test/run.sh
+#
+# Tests fail loudly and stop on the first failure (set -e). Each test writes
+# a one-line summary to stdout.
+
+set -uo pipefail
+
+TESTS_RUN=0
+TESTS_FAILED=0
+
+REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT="$REPO_ROOT/bin/omarchy-pbs-backup"
+FIXTURES="$REPO_ROOT/test/fixtures"
+
+assert_eq() {
+  local label="$1"
+  local expected="$2"
+  local actual="$3"
+  if [ "$expected" = "$actual" ]; then
+    printf '  ok    %s\n' "$label"
+  else
+    printf '  FAIL  %s\n' "$label"
+    printf '        expected: %s\n' "$expected"
+    printf '        actual:   %s\n' "$actual"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
+assert_contains() {
+  local label="$1"
+  local needle="$2"
+  local haystack="$3"
+  if [[ "$haystack" == *"$needle"* ]]; then
+    printf '  ok    %s\n' "$label"
+  else
+    printf '  FAIL  %s\n' "$label"
+    printf '        needle:   %s\n' "$needle"
+    printf '        haystack: %s\n' "$haystack"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
+# Each test runs in its own throwaway HOME so secrets and state can't leak
+# across tests. Cannot be called inside $() because exports done in a subshell
+# are discarded when the subshell exits.
+setup_isolated_home() {
+  tmp="$(mktemp -d)"
+  export HOME="$tmp"
+  export XDG_CONFIG_HOME="$tmp/.config"
+  export XDG_STATE_HOME="$tmp/.local/state"
+  mkdir -p -- "$XDG_CONFIG_HOME/omarchy-pbs-backup" "$XDG_STATE_HOME/omarchy-pbs-backup"
+}
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+test_status_no_config() {
+  setup_isolated_home
+  local out; out="$("$SCRIPT" status --json 2>&1)"
+  assert_contains "status no config → error present" "configured" "$out"
+  assert_contains "status no config → false" '"configured":false' "$out"
+  rm -rf -- "$tmp"
+}
+
+test_status_invalid_config_name() {
+  setup_isolated_home
+  cp "$FIXTURES/config-invalid-name.json" "$XDG_CONFIG_HOME/omarchy-pbs-backup/config.json"
+  local out; out="$("$SCRIPT" status --json 2>&1)"
+  assert_contains "invalid name → invalid flag" '"invalid":true' "$out"
+  assert_contains "invalid name → explanation" "every group needs a name" "$out"
+  rm -rf -- "$tmp"
+}
+
+test_status_invalid_config_duplicate() {
+  setup_isolated_home
+  cp "$FIXTURES/config-duplicate-name.json" "$XDG_CONFIG_HOME/omarchy-pbs-backup/config.json"
+  local out; out="$("$SCRIPT" status --json 2>&1)"
+  assert_contains "duplicate name → invalid flag" '"invalid":true' "$out"
+  assert_contains "duplicate name → explanation" "duplicate group names" "$out"
+  rm -rf -- "$tmp"
+}
+
+test_groups_no_groups_field() {
+  setup_isolated_home
+  cat > "$XDG_CONFIG_HOME/omarchy-pbs-backup/config.json" <<JSON
+{
+  "pbs": { "repository": "x@y:datastore" }
+}
+JSON
+  local out; out="$("$SCRIPT" status --json 2>&1)"
+  assert_contains "missing groups → invalid flag" '"invalid":true' "$out"
+  assert_contains "missing groups → explanation" "no groups list" "$out"
+  rm -rf -- "$tmp"
+}
+
+test_status_valid_config_no_state() {
+  setup_isolated_home
+  cp "$FIXTURES/config-valid.json" "$XDG_CONFIG_HOME/omarchy-pbs-backup/config.json"
+  local out; out="$("$SCRIPT" status --json 2>&1)"
+  assert_contains "valid config → configured true" '"configured":true' "$out"
+  assert_contains "valid config → group name present" "external-drive" "$out"
+  rm -rf -- "$tmp"
+}
+
+test_snapshots_json_parsing() {
+  # Feed the snapshots JSON shape into jq the same way cmd_snapshots does,
+  # and verify the field shape that goes to the widget.
+  local out; out="$(jq -c '{ok:true, snapshots:([.[] | {id: ("\(.["backup-type"] // "host")/\(.["backup-id"])/\(.time)"),
+                                 short_id: .["backup-id"],
+                                 time: .time,
+                                 size: .size}] | reverse)}' \
+    < "$FIXTURES/snapshot-list.json" 2>&1)"
+  assert_contains "snapshots → id encoded" "host/external-drive/" "$out"
+  assert_contains "snapshots → time carried" "2026-09-08T03:00:14Z" "$out"
+  assert_contains "snapshots → size carried" '12345678901' "$out"
+}
+
+test_snapshots_empty_list() {
+  local out; out="$(jq -c '{ok:true, snapshots:([.[] | {id: ("\(.["backup-type"] // "host")/\(.["backup-id"])/\(.time)"),
+                                 short_id: .["backup-id"],
+                                 time: .time,
+                                 size: .size}] | reverse)}' \
+    < "$FIXTURES/snapshot-list-empty.json" 2>&1)"
+  assert_contains "empty snapshots → ok:true" '"ok":true' "$out"
+  assert_contains "empty snapshots → empty array" '"snapshots":[]' "$out"
+}
+
+test_archives_json_parsing() {
+  local out; out="$(jq -c '{ok:true, archives:[.[] | {name: .filename, size: .size, type: .filetype}]}' \
+    < "$FIXTURES/snapshot-files.json" 2>&1)"
+  assert_contains "archives → pxar carried" '"name":"external-drive.pxar"' "$out"
+  assert_contains "archives → size carried" '12345678901' "$out"
+  assert_contains "archives → type carried" '"type":"pxar"' "$out"
+}
+
+test_status_with_state_file() {
+  setup_isolated_home
+  mkdir -p -- "$XDG_CONFIG_HOME/omarchy-pbs-backup"
+  cp "$FIXTURES/config-valid.json" "$XDG_CONFIG_HOME/omarchy-pbs-backup/config.json"
+  mkdir -p -- "$XDG_STATE_HOME/omarchy-pbs-backup"
+  cp "$FIXTURES/status-ok.json" "$XDG_STATE_HOME/omarchy-pbs-backup/status.json"
+  local out; out="$("$SCRIPT" status --json 2>&1)"
+  assert_contains "with state → snapshot count carried" '"snapshot_count":24' "$out"
+  assert_contains "with state → last_run.result" '"result":"ok"' "$out"
+  rm -rf -- "$tmp"
+}
+
+test_sanitize_for_pbs_id() {
+  # Pull sanitize_for_pbs_id out of the script and exercise it.
+  local fn; fn="$(awk '/^sanitize_for_pbs_id\(\)/,/^}/' "$SCRIPT")"
+  local out
+  out="$(bash -c "$fn; sanitize_for_pbs_id '../../../etc/passwd'")"
+  assert_eq "sanitize → path traversal defanged" "..-..-..-etc-passwd" "$out"
+  out="$(bash -c "$fn; sanitize_for_pbs_id 'normal_name-1.pxar'")"
+  assert_eq "sanitize → normal preserved" "normal_name-1.pxar" "$out"
+  out="$(bash -c "$fn; sanitize_for_pbs_id ''")"
+  assert_eq "sanitize → empty yields empty" "" "$out"
+}
+
+test_basename_safe() {
+  local fn; fn="$(awk '/^basename_safe\(\)/,/^}/' "$SCRIPT")"
+  local out
+  out="$(bash -c "$fn; basename_safe '/mnt/external-drive/'")"
+  assert_eq "basename → trailing slash stripped" "external-drive" "$out"
+  out="$(bash -c "$fn; basename_safe 'a/b/c'")"
+  assert_eq "basename → last component" "c" "$out"
+}
+
+test_key_show_no_secret() {
+  setup_isolated_home
+  cp "$FIXTURES/config-valid.json" "$XDG_CONFIG_HOME/omarchy-pbs-backup/config.json"
+  local code
+  "$SCRIPT" key show >/dev/null 2>&1
+  code=$?
+  assert_eq "key show with no secret → exit 1" "1" "$code"
+  rm -rf -- "$tmp"
+}
+
+test_key_set_writes_secret() {
+  setup_isolated_home
+  cp "$FIXTURES/config-valid.json" "$XDG_CONFIG_HOME/omarchy-pbs-backup/config.json"
+  local secret="$XDG_CONFIG_HOME/omarchy-pbs-backup/.secret"
+  printf 'hunter2\n' | "$SCRIPT" key set >/dev/null 2>&1
+  local exists=0
+  [ -f "$secret" ] && exists=1
+  assert_eq "key set → file exists" "1" "$exists"
+  local mode; mode="$(stat -c '%a' "$secret")"
+  assert_eq "key set → mode 600" "600" "$mode"
+  local content; content="$(cat "$secret")"
+  assert_eq "key set → content matches" "hunter2" "$content"
+  rm -rf -- "$tmp"
+}
+
+test_verbose() {
+  printf '\n== sanity ==\n'
+  local script_exists=0
+  [ -x "$SCRIPT" ] && script_exists=1
+  assert_eq "script is executable" "1" "$script_exists"
+
+  local out; out="$("$SCRIPT" --version)"
+  assert_contains "--version prints version" "omarchy-pbs-backup " "$out"
+
+  local help; help="$("$SCRIPT" help 2>&1)"
+  assert_contains "help mentions backup" "backup --dest" "$help"
+  assert_contains "help mentions restore" "restore --dest" "$help"
+  assert_contains "help mentions mount" "mount --dest" "$help"
+
+  local unknown; unknown="$("$SCRIPT" no-such-command 2>&1)"
+  assert_contains "unknown command → error" "unknown command" "$unknown"
+
+  local script_size; script_size="$(wc -l < "$SCRIPT")"
+  [ "$script_size" -gt 200 ]
+  assert_eq "script has substance (200+ lines)" "0" "$?"
+}
+
+# Run all tests.
+main() {
+  printf 'omarchy-pbs-backup tests\n'
+  printf -- '------------------------\n'
+  test_verbose
+  test_status_no_config
+  test_status_invalid_config_name
+  test_status_invalid_config_duplicate
+  test_groups_no_groups_field
+  test_status_valid_config_no_state
+  test_status_with_state_file
+  test_snapshots_json_parsing
+  test_snapshots_empty_list
+  test_archives_json_parsing
+  test_sanitize_for_pbs_id
+  test_basename_safe
+  test_key_show_no_secret
+  test_key_set_writes_secret
+  printf -- '------------------------\n'
+  printf '%d checks run, %d failed\n' "$TESTS_RUN" "$TESTS_FAILED"
+  [ "$TESTS_FAILED" = "0" ]
+}
+
+main

@@ -1,0 +1,1416 @@
+#!/usr/bin/env bash
+# shellcheck shell=bash
+#
+# omarchy-pbs-backup: Proxmox Backup Server (PBS) snapshots with a bar widget
+# on top.
+#
+# This is the only place that touches proxmox-backup-client, systemd and the
+# state files; the QML widget does nothing but call this script and read JSON.
+# That split is deliberate: showing "3 hours ago" must never need a password,
+# a network round trip or a sleeping NAS, and that only holds if the widget
+# reads status.json and nothing else.
+#
+#   omarchy-pbs-backup status --json                  status of every group (no network)
+#   omarchy-pbs-backup groups [--json]                configured groups
+#   omarchy-pbs-backup key set|show                   manage the PBS secret
+#   omarchy-pbs-backup backup --dest GROUP [--dry-run]
+#   omarchy-pbs-backup snapshots --dest GROUP --json  list snapshots for a group
+#   omarchy-pbs-backup archives --dest GROUP --snapshot ID --json
+#   omarchy-pbs-backup mount --dest GROUP --snapshot ID --archive NAME
+#   omarchy-pbs-backup unmount --dest GROUP
+#   omarchy-pbs-backup ls --dest GROUP --snapshot ID --archive NAME --path P --json
+#   omarchy-pbs-backup restore --dest GROUP --snapshot ID --archive NAME [--target DIR] [--pattern PAT]
+#   omarchy-pbs-backup install                       (re)write and enable systemd units
+#   omarchy-pbs-backup report-failure --dest GROUP
+#   omarchy-pbs-backup config create                 write a starter configuration
+#   omarchy-pbs-backup log [--dest GROUP]
+#
+# Dependencies: bash, jq, proxmox-backup-client, mountpoint (from util-linux),
+# fusermount3 (or fusermount from fuse2 -- PBS prefers fuse3).
+#
+# Secrets: the PBS password (or API token secret) travels through PBS_PASSWORD_FILE
+# (never as an argument). /proc/PID/cmdline is 0444 and readable by every
+# account on the machine; /proc/PID/environ is 0400, which makes the
+# environment an acceptable route for the repository URL, fingerprint, and
+# auth-id (the latter two can carry user-identifying info but no secrets).
+
+set -uo pipefail
+umask 077
+
+VERSION="0.1.0"
+
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-pbs-backup"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-pbs-backup"
+CONFIG_FILE="$CONFIG_DIR/config.json"
+SECRET_FILE="$CONFIG_DIR/.secret"
+STATUS_FILE="$STATE_DIR/status.json"
+LOG_ROOT="$STATE_DIR/logs"
+MOUNT_ROOT="$STATE_DIR/mounts"
+SYSTEMD_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+
+LOG_RETENTION_DAYS=30
+BACKUP_TIMEOUT_SECONDS=36000      # 10h; matches the original time-machine cap
+LS_ENTRY_CAP=500
+SNAPSHOT_CAP=200
+PROGRESS_INTERVAL_MS=500
+STALE_PROGRESS_SECONDS=10
+# proxmox-backup-client snapshot files can produce large JSON for a backup
+# with many archives; cap the read so a giant listing cannot blow up the
+# widget's memory.
+SNAPSHOT_BYTE_CAP=$((4 * 1024 * 1024))
+
+SELF="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/$(basename -- "${BASH_SOURCE[0]}")"
+PLUGIN_DIR="$(dirname -- "$(dirname -- "$SELF")")"
+
+# Shipped with the plugin rather than named from the icon theme: the generic
+# dialog-* names resolve to a 16x16 legacy bitmap on a stock Arch install, and
+# arrive in the notification upscaled and blurry.
+icon_for() {
+  local name="$1"
+  local fallback="${2:-dialog-information}"
+  local path="$PLUGIN_DIR/$name.svg"
+  if readable_file "$path"; then printf '%s' "$path"; else printf '%s' "$fallback"; fi
+}
+
+# Set by commands that produce machine-readable output, so die() can answer in
+# JSON instead of dumping a message QML cannot tell apart from a crash.
+JSON_MODE=0
+
+# die() must only ever be called from the main shell, never from inside a
+# command substitution: there it would exit the subshell and the caller would
+# sail on with an empty string.
+die() {
+  if [ "$JSON_MODE" = "1" ]; then
+    jq -nc --arg e "$*" '{ok:false, error:$e}'
+    exit 0
+  fi
+  printf 'Error: %s\n' "$*" >&2
+  exit 1
+}
+
+need() { command -v "$1" >/dev/null 2>&1 || die "$1 is not installed"; }
+
+# Every notification goes through here, so one variable can silence the lot.
+notify() {
+  [ -n "${OMARCHY_PBS_BACKUP_QUIET:-}" ] && return 0
+  notify-send "$@" >/dev/null 2>&1
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# File safety
+# ---------------------------------------------------------------------------
+
+# Two kinds of "exists and is readable", and the difference matters.
+#
+# readable_file is strict -- a symlink is refused -- and is for paths *we* own
+# and write: state, progress, the secret. There an unexpected symlink is
+# somebody redirecting our writes.
+#
+# user_file follows symlinks, and is for paths the *user* named in their own
+# configuration: config.json itself. Dotfiles managed with stow are symlinks
+# by design, and refusing them would break an entirely ordinary setup for no
+# security gain: we only ever read these, and every write in this script goes
+# through write_private, which replaces the path rather than following it.
+readable_file() { [ -f "$1" ] && [ ! -L "$1" ]; }
+user_file() { [ -f "$1" ]; }
+
+# $2.. are subdirectory names that belong here (logs/, mounts/) and must
+# survive the sweep.
+private_dir() {
+  local dir="$1"; shift
+  local keep=("$@") owner entry base skip k
+
+  mkdir -p -m 700 -- "$dir" 2>/dev/null
+  { [ -d "$dir" ] && [ ! -L "$dir" ]; } || die "$dir is a symlink or not a directory"
+  owner="$(stat -c '%u' -- "$dir" 2>/dev/null)" || die "cannot stat $dir"
+  [ "$owner" = "$(id -u)" ] || die "$dir is owned by someone else"
+  chmod 700 -- "$dir" 2>/dev/null || die "cannot chmod $dir"
+
+  shopt -s nullglob dotglob
+  for entry in "$dir"/*; do
+    base="$(basename -- "$entry")"
+    if [ -f "$entry" ] && [ ! -L "$entry" ]; then
+      chmod 600 -- "$entry" 2>/dev/null
+      continue
+    fi
+    skip=0
+    for k in ${keep+"${keep[@]}"}; do
+      if [ "$base" = "$k" ] && [ -d "$entry" ] && [ ! -L "$entry" ]; then skip=1; fi
+    done
+    [ "$skip" = "1" ] && continue
+    rm -rf -- "$entry" 2>/dev/null
+  done
+  shopt -u nullglob dotglob
+  return 0
+}
+
+# The user's own directory: make sure it is private and that anything holding
+# a secret is 600, but never remove what is in it.
+config_dir_secure() {
+  local entry owner
+  mkdir -p -m 700 -- "$CONFIG_DIR" 2>/dev/null
+  { [ -d "$CONFIG_DIR" ] && [ ! -L "$CONFIG_DIR" ]; } || die "$CONFIG_DIR is a symlink or not a directory"
+  owner="$(stat -c '%u' -- "$CONFIG_DIR" 2>/dev/null)" || die "cannot stat $CONFIG_DIR"
+  [ "$owner" = "$(id -u)" ] || die "$CONFIG_DIR is owned by someone else"
+  chmod 700 -- "$CONFIG_DIR" 2>/dev/null
+
+  shopt -s nullglob
+  for entry in "$CONFIG_DIR"/.secret "$CONFIG_DIR"/config.json; do
+    [ -f "$entry" ] && [ ! -L "$entry" ] && chmod 600 -- "$entry" 2>/dev/null
+  done
+  shopt -u nullglob
+  return 0
+}
+
+# Write through a temporary file and rename: that replaces the path itself,
+# not whatever the path points at. A bare `>` follows a symlink already there.
+write_private() {
+  local dest="$1" tmp
+  mkdir -p -m 700 -- "$(dirname -- "$dest")" 2>/dev/null
+  tmp="$(mktemp -- "$dest.XXXXXX")" || return 1
+  chmod 600 -- "$tmp" 2>/dev/null
+  if ! cat > "$tmp"; then rm -f -- "$tmp"; return 1; fi
+  mv -f -- "$tmp" "$dest" || { rm -f -- "$tmp"; return 1; }
+}
+
+# A cache file must never be able to break the script: jq refuses invalid JSON
+# and would take the whole run down with it, not just the lookup that needed
+# the file. Fall back to the given default instead.
+read_json_or() {
+  local path="$1" fallback="$2"
+  if readable_file "$path" && jq -e . -- "$path" >/dev/null 2>&1; then
+    cat -- "$path"
+  else
+    printf '%s' "$fallback"
+  fi
+}
+
+expand_tilde() {
+  local value="$1"
+  case "$value" in
+    "~") printf '%s' "$HOME" ;;
+    "~/"*) printf '%s' "$HOME/${value#\~/}" ;;
+    *) printf '%s' "$value" ;;
+  esac
+}
+
+trim() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "$value"
+}
+
+# Bash re-evaluates the *contents* of a name inside $(( )), and an array
+# subscript there is a command substitution. Anything that came from PBS, a
+# config file or the network goes through this first.
+number_or() {
+  local value="$1" fallback="$2"
+  case "$value" in ''|*[!0-9]*) printf '%s' "$fallback"; return 0 ;; esac
+  [ "${#value}" -le 12 ] || { printf '%s' "$fallback"; return 0; }
+  printf '%s' "$((10#$value))"
+}
+
+now_ms() {
+  local seconds nanos
+  seconds="$(date +%s)"
+  nanos="$(date +%N)"
+  nanos="$(number_or "$nanos" 0)"
+  printf '%s' "$(( seconds * 1000 + nanos / 1000000 ))"
+}
+
+# PBS backup-id derivation, mirrored from the existing pbs-adhoc-backup.sh
+# script so a backup from either tool lands on the same PBS group. The
+# sanitizer replaces every non-[A-Za-z0-9._-] character with '-', so a value
+# like '../../../etc/passwd' becomes '..-..-..-etc-passwd' -- no
+# path-traversal characters survive.
+sanitize_for_pbs_id() {
+  printf '%s' "$1" | tr -c 'A-Za-z0-9._-' -
+}
+
+# Strip path-separator and shell-meta characters before computing the default
+# backup-id. Same regex as the existing script.
+basename_safe() {
+  local p="$1"
+  p="${p%/}"
+  printf '%s' "${p##*/}"
+}
+
+# ---------------------------------------------------------------------------
+# Option parsing
+# ---------------------------------------------------------------------------
+
+OPT_DEST=""
+OPT_SNAPSHOT=""
+OPT_ARCHIVE=""
+OPT_PATH=""
+OPT_TARGET=""
+OPT_PATTERN=""
+OPT_DRY_RUN=0
+OPT_JSON=0
+declare -a POSITIONAL=()
+
+parse_options() {
+  OPT_DEST=""; OPT_SNAPSHOT=""; OPT_ARCHIVE=""; OPT_PATH=""
+  OPT_TARGET=""; OPT_PATTERN=""; OPT_DRY_RUN=0; OPT_JSON=0
+  POSITIONAL=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --dest) OPT_DEST="${2:-}"; shift 2 || shift ;;
+      --snapshot) OPT_SNAPSHOT="${2:-}"; shift 2 || shift ;;
+      --archive) OPT_ARCHIVE="${2:-}"; shift 2 || shift ;;
+      --path) OPT_PATH="${2:-}"; shift 2 || shift ;;
+      --target) OPT_TARGET="${2:-}"; shift 2 || shift ;;
+      --pattern) OPT_PATTERN="${2:-}"; shift 2 || shift ;;
+      --dry-run) OPT_DRY_RUN=1; shift ;;
+      --json) OPT_JSON=1; shift ;;
+      *) POSITIONAL+=("$1"); shift ;;
+    esac
+  done
+}
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+CONFIG_JSON=""
+GROUP_JSON=""
+GROUP_NAME=""
+
+# Checks a configuration and prints what is wrong with it, if anything. Kept
+# separate from load_config on purpose: die() exits 0 under --json so that QML
+# gets a clean {"ok":false} instead of a crash, which means a caller cannot use
+# the exit status to tell "broken" from "fine". This can.
+config_problem() {
+  local json="$1"
+
+  jq -e 'type == "object"' >/dev/null 2>&1 <<<"$json" || {
+    printf '%s' "config.json is not valid JSON, or not an object"; return 1; }
+  jq -e '(.groups | type) == "array" and (.groups | length) > 0' >/dev/null 2>&1 <<<"$json" || {
+    printf '%s' "config.json has no groups list"; return 1; }
+
+  local problem
+  problem="$(jq -r '
+    [.groups[] | .name] as $names
+    | ($names | map(select(type == "string" and (test("^[A-Za-z0-9][A-Za-z0-9._-]*$"))))) as $valid
+    | if ($names | length) != ($valid | length)
+      then "every group needs a name (letters, digits, . _ - allowed). Note that display_name is a label, not a replacement for it."
+      elif ($names | length) != ($names | unique | length)
+      then "duplicate group names: " + (($names | group_by(.) | map(select(length > 1) | .[0])) | join(", "))
+      else "" end' <<<"$json" 2>/dev/null)"
+
+  [ -z "$problem" ] && return 0
+  printf '%s' "$problem"
+  return 1
+}
+
+load_config() {
+  user_file "$CONFIG_FILE" ||
+    die "no configuration at $CONFIG_FILE, create one (see the README) or use the button in the panel"
+
+  CONFIG_JSON="$(cat -- "$CONFIG_FILE")"
+
+  local problem
+  problem="$(config_problem "$CONFIG_JSON")" || die "$problem"
+  return 0
+}
+
+cfg() { jq -r "$1" <<<"$CONFIG_JSON"; }
+
+# Selects the group and leaves it in GROUP_JSON / GROUP_NAME.
+select_destination() {
+  local wanted="${1:-}"
+  [ -n "$wanted" ] || wanted="$(cfg '.groups[0].name')"
+
+  GROUP_JSON="$(jq -c --arg n "$wanted" '.groups[] | select(.name == $n)' <<<"$CONFIG_JSON")"
+  [ -n "$GROUP_JSON" ] ||
+    die "unknown group \"$wanted\"; available: $(cfg '[.groups[].name] | join(", ")')"
+  GROUP_NAME="$wanted"
+}
+
+group() { jq -r "$1" <<<"$GROUP_JSON"; }
+
+# What a human sees. `name` is an identifier -- it names the secret file (in
+# a future per-group variant), the systemd unit and the log directory -- so it
+# is deliberately restricted to a safe character set. display_name carries no
+# such constraint.
+group_label() {
+  local label
+  label="$(group '.display_name // empty')"
+  [ -n "$label" ] || label="$GROUP_NAME"
+  printf '%s' "$label"
+}
+
+# What PBS sees: the --backup-id flag. Per-group `backup_id` field overrides;
+# empty / null falls back to the sanitized basename of the source path,
+# matching the existing pbs-adhoc-backup.sh convention so two tools do not
+# create two separate PBS groups for the same source.
+group_backup_id() {
+  local explicit source base
+  explicit="$(group '.backup_id // empty')"
+  if [ -n "$explicit" ]; then
+    printf '%s' "$(sanitize_for_pbs_id "$explicit")"
+    return 0
+  fi
+  source="$(group '.source // empty')"
+  [ -n "$source" ] || source="$HOME"
+  base="$(basename_safe "$source")"
+  printf '%s' "$(sanitize_for_pbs_id "$base")"
+}
+
+keep_value() {
+  local key="$1" fallback="$2" value
+  value="$(jq -r --arg k "$key" '.retention[$k] // empty' <<<"$GROUP_JSON" 2>/dev/null)"
+  [ -n "$value" ] || value="$(jq -r --arg k "$key" '.retention[$k] // empty' <<<"$CONFIG_JSON" 2>/dev/null)"
+  number_or "$value" "$fallback"
+}
+
+# ---------------------------------------------------------------------------
+# PBS environment
+# ---------------------------------------------------------------------------
+
+# Read the secret and export everything PBS expects in the environment, never
+# in argv. PBS_PASSWORD_FILE is the safest form: the file's contents are read
+# by PBS itself, so the password never lands in /proc/<our-pid>/environ or any
+# child's argv.
+pbs_context() {
+  if [ -n "${PBS_PASSWORD_FILE:-}" ]; then
+    # Honour a caller-provided override (used by tests).
+    user_file "$PBS_PASSWORD_FILE" ||
+      die "PBS_PASSWORD_FILE=$PBS_PASSWORD_FILE is not a readable file"
+  else
+    [ -e "$SECRET_FILE" ] ||
+      die "no secret at $SECRET_FILE, run: omarchy-pbs-backup key set"
+    [ -f "$SECRET_FILE" ] && [ ! -L "$SECRET_FILE" ] ||
+      die "$SECRET_FILE must be a regular file (not a symlink)"
+    chmod 600 -- "$SECRET_FILE" 2>/dev/null
+    export PBS_PASSWORD_FILE="$SECRET_FILE"
+  fi
+
+  local repository auth_id fingerprint namespace
+  repository="$(cfg '.pbs.repository // empty')"
+  [ -n "$repository" ] || [ -n "${PBS_REPOSITORY:-}" ] ||
+    die "pbs.repository is not set in config.json"
+
+  auth_id="$(cfg '.pbs.auth_id // empty')"
+  fingerprint="$(cfg '.pbs.fingerprint // empty')"
+  namespace="$(cfg '.namespace // empty')"
+
+  # Only override env vars that aren't already set, so tests can pin values
+  # via the environment without the script clobbering them.
+  [ -n "$repository" ] && [ -z "${PBS_REPOSITORY:-}" ] && export PBS_REPOSITORY="$repository"
+  [ -n "$auth_id" ] && [ -z "${PBS_AUTH_ID:-}" ] && export PBS_AUTH_ID="$auth_id"
+  [ -n "$fingerprint" ] && [ -z "${PBS_FINGERPRINT:-}" ] && export PBS_FINGERPRINT="$fingerprint"
+  [ -n "$namespace" ] && [ -z "${PBS_NAMESPACE:-}" ] && export PBS_NAMESPACE="$namespace"
+
+  return 0
+}
+
+# Whether a read came back at its ceiling, which means there was more to come.
+# Callers pipe through `head -c cap+1`, so that one extra byte is the evidence:
+# at cap+1 the stream was cut, and the only honest thing to do with a truncated
+# JSON stream is to say so.
+#
+# Measured rather than signalled through exit status. These reads run under
+# `set -o pipefail` behind a `head` that closes the pipe early, which hands
+# the producer a SIGPIPE and makes the whole pipeline non-zero on a perfectly
+# good listing. Reading that as failure would refuse every large listing.
+over_byte_cap() {
+  [ "$(printf '%s' "$1" | wc -c)" -gt "$2" ]
+}
+
+# Run proxmox-backup-client with the environment configured for this run.
+# Args are passed through verbatim. We deliberately do NOT `exec` -- callers
+# may need to do post-processing, and exit code handling needs to live in the
+# caller.
+pbs_run() { proxmox-backup-client "$@"; }
+
+# ---------------------------------------------------------------------------
+# Progress and status files
+# ---------------------------------------------------------------------------
+
+PROGRESS_FILE=""
+PROGRESS_KIND=""
+PROGRESS_UNIT=""
+PROGRESS_STARTED=0
+PROGRESS_LAST=0
+
+progress_init() {
+  PROGRESS_KIND="$1"
+  PROGRESS_UNIT="${2:-}"
+  PROGRESS_FILE="$STATE_DIR/progress-$GROUP_NAME.json"
+  PROGRESS_STARTED="$(date +%s)"
+  PROGRESS_LAST=0
+}
+
+# progress_write <state> <phase> <force> [extra-json]
+progress_write() {
+  local state="$1" phase="$2" force="$3" extra="${4:-}" now elapsed epoch
+  [ -n "$extra" ] || extra='{}'
+  now="$(now_ms)"
+  if [ "$force" != "1" ] && [ $((now - PROGRESS_LAST)) -lt "$PROGRESS_INTERVAL_MS" ]; then
+    return 0
+  fi
+  PROGRESS_LAST="$now"
+  epoch="$(date +%s)"
+  elapsed=$((epoch - PROGRESS_STARTED))
+
+  jq -nc \
+    --arg state "$state" \
+    --arg kind "$PROGRESS_KIND" \
+    --arg phase "$phase" \
+    --arg unit "$PROGRESS_UNIT" \
+    --argjson elapsed "$elapsed" \
+    --argjson pid "$$" \
+    --arg updated "$(date -Iseconds)" \
+    --argjson updated_epoch "$epoch" \
+    --argjson extra "$extra" \
+    '{state:$state, kind:$kind, phase:$phase, seconds_elapsed:$elapsed,
+      unit:(if $unit == "" then null else $unit end), pid:$pid,
+      updated_at:$updated, updated_epoch:$updated_epoch}
+     + $extra' | write_private "$PROGRESS_FILE"
+  return 0
+}
+
+load_status() {
+  read_json_or "$STATUS_FILE" '{"version":1,"groups":{}}'
+}
+
+# ---------------------------------------------------------------------------
+# Log files
+# ---------------------------------------------------------------------------
+
+LOG_FILE=""
+
+open_log() {
+  local dir="$LOG_ROOT/$GROUP_NAME"
+  mkdir -p -m 700 -- "$dir"
+  LOG_FILE="$dir/$(date +%Y-%m-%d_%H%M%S).log"
+  : > "$LOG_FILE"
+  chmod 600 -- "$LOG_FILE"
+}
+
+# Under a --json command stdout carries the payload and nothing else. A
+# progress line printed there corrupts it. Human-readable output therefore
+# goes to stderr whenever the caller asked for JSON.
+log_line() {
+  if [ "$JSON_MODE" = "1" ]; then
+    printf '%s\n' "$*" >&2
+  else
+    printf '%s\n' "$*"
+  fi
+  [ -n "$LOG_FILE" ] && printf '%s\n' "$*" >> "$LOG_FILE"
+  return 0
+}
+
+prune_old_logs() {
+  local dir="$LOG_ROOT/$GROUP_NAME"
+  [ -d "$dir" ] || return 0
+  find "$dir" -maxdepth 1 -name '*.log' -type f -mtime "+$LOG_RETENTION_DAYS" -delete 2>/dev/null
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Validating what arrives from the widget
+# ---------------------------------------------------------------------------
+
+validate_snapshot_id() {
+  # PBS snapshot ids look like "host/<id>/2026-09-08T03:00:00Z". We accept
+  # anything that has the form <type>/<id>/<timestamp>; the snapshot list
+  # subcommand hands them to us so they came from PBS in the first place.
+  [[ "$1" =~ ^[A-Za-z0-9._:-]+(/[A-Za-z0-9._:-]+)?/[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] \
+    || die "invalid snapshot id \"$1\""
+  return 0
+}
+
+validate_archive_name() {
+  # PBS archive names contain alphanumerics, hyphens, underscores, and dots.
+  [[ "$1" =~ ^[A-Za-z0-9._:-]+$ ]] \
+    || die "invalid archive name \"$1\""
+  return 0
+}
+
+validate_absolute_path() {
+  case "$1" in
+    /*) return 0 ;;
+    *) die "path must be absolute: \"$1\"" ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+key_warning() {
+  cat <<'TEXT'
+── Keep a copy of this secret somewhere else ──────────────────────────
+The secret file lives in your home directory. PBS auth protects your
+data on the server, but anyone who can read this file can run backups
+against your namespace. Put a copy in a password manager, on paper, or
+on another host.
+────────────────────────────────────────────────────────────────────
+TEXT
+}
+
+cmd_key() {
+  local action="${1:-}"
+  [ "$#" -gt 0 ] && shift
+  parse_options "$@"
+
+  load_config
+  config_dir_secure
+
+  case "$action" in
+    set)
+      local password
+      printf 'PBS password (or API token secret) for this machine:\n' >&2
+      if [ -t 0 ]; then
+        read -rs password
+        printf '\n' >&2
+      else
+        IFS= read -r password
+      fi
+      [ -n "$(trim "$password")" ] || die "empty password"
+
+      printf '%s\n' "$password" | write_private "$SECRET_FILE" ||
+        die "could not write $SECRET_FILE"
+      chmod 600 -- "$SECRET_FILE" 2>/dev/null
+      printf 'Secret written to %s (mode 600).\n\n' "$SECRET_FILE"
+      key_warning
+      ;;
+    show)
+      readable_file "$SECRET_FILE" || die "no secret at $SECRET_FILE"
+      key_warning
+      printf '\n'
+      cat -- "$SECRET_FILE"
+      ;;
+    *)
+      die "usage: key set|show"
+      ;;
+  esac
+}
+
+# Everything worth knowing about every group, without touching PBS. Reads the
+# configuration and the local state file only, so it answers instantly whether
+# or not the server is reachable.
+groups_table() {
+  load_config
+
+  local status name label backup_id repo schedule last size snaps units
+  status="$(load_status)"
+
+  units="no"
+  readable_file "$SYSTEMD_DIR/omarchy-pbs-backup@.service" && units="yes"
+
+  printf '%-22s %-22s %-38s %-14s %s\n' NAME LABEL WHERE SCHEDULE "LAST BACKUP"
+  printf '%-22s %-22s %-38s %-14s %s\n' ---------------------- ---------------------- \
+    -------------------------------------- -------------- -----------
+
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    select_destination "$name"
+    label="$(group_label)"
+    backup_id="$(group_backup_id)"
+    repo="$(cfg '.pbs.repository // empty')"
+    schedule="$(group '.schedule // empty')"
+    [ -n "$schedule" ] || schedule="on request"
+
+    last="$(jq -r --arg n "$name" '
+      .groups[$n].last_run // {} |
+      if .finished_at then
+        (.finished_at | sub("T"; " ") | .[0:16]) + (if .result == "failed" then "  FAILED" else "" end)
+      else "never" end' <<<"$status" 2>/dev/null)"
+    [ -n "$last" ] || last="never"
+
+    # Truncate rather than wrap.
+    [ "${#repo}" -gt 38 ] && repo="${repo:0:35}..."
+    [ "${#label}" -gt 22 ] && label="${label:0:19}..."
+    [ "${#name}" -gt 22 ] && name="${name:0:19}..."
+
+    printf '%-22s %-22s %-38s %-14s %s\n' "$name" "$label" "$repo" "$schedule" "$last"
+  done < <(cfg '.groups[].name')
+
+  size="$(jq -r '[.groups[] | .snapshot_count // 0] | add // 0' <<<"$status" 2>/dev/null)"
+  snaps="$(jq -r '[.groups[] | .snapshot_count // 0] | add // 0' <<<"$status" 2>/dev/null)"
+  if [ "$(number_or "$snaps" 0)" -gt 0 ]; then
+    printf '\n%s snapshots tracked\n' "$snaps"
+  fi
+
+  [ "$units" = "yes" ] || printf '\nNothing is scheduled yet. Run: omarchy-pbs-backup install\n'
+  return 0
+}
+
+cmd_groups() {
+  parse_options "$@"
+  [ "$OPT_JSON" = "1" ] || { groups_table; return $?; }
+
+  JSON_MODE=1
+  load_config
+  local out name backup_id display schedule
+
+  out='[]'
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    select_destination "$name"
+    backup_id="$(group_backup_id)"
+    display="$(cfg '.pbs.repository // empty')"
+    schedule="$(group '.schedule // empty')"
+    out="$(jq -c \
+      --arg name "$name" \
+      --arg label "$(group_label)" \
+      --arg backup_id "$backup_id" \
+      --arg display "$display" \
+      --arg schedule "$schedule" \
+      '. + [{name:$name, display_name:$label, backup_id:$backup_id,
+             repository_display:$display,
+             schedule:(if $schedule == "" then null else $schedule end)}]' <<<"$out")"
+  done < <(cfg '.groups[].name')
+
+  jq -nc --argjson g "$out" '{ok:true, groups:$g}'
+}
+
+# The only call the widget makes on a timer. Deliberately touches no network
+# and no key file: configuration, status.json and the progress file, no more.
+cmd_status() {
+  JSON_MODE=1
+  if ! user_file "$CONFIG_FILE"; then
+    jq -nc --arg e "no configuration at $CONFIG_FILE" \
+      '{ok:true, configured:false, invalid:false, error:$e, groups:[]}'
+    return 0
+  fi
+
+  local problem
+  if ! problem="$(config_problem "$(cat -- "$CONFIG_FILE")")"; then
+    jq -nc --arg e "$problem" \
+      '{ok:true, configured:false, invalid:true, error:$e, groups:[]}'
+    return 0
+  fi
+  load_config
+
+  local status out name progress running epoch age updated installed
+  status="$(load_status)"
+  epoch="$(date +%s)"
+  out='[]'
+
+  installed=false
+  readable_file "$SYSTEMD_DIR/omarchy-pbs-backup@.service" && installed=true
+
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    progress="$(read_json_or "$STATE_DIR/progress-$name.json" 'null')"
+    running=false
+
+    # A progress file older than ten seconds means the writer died without
+    # closing it; treating that as "running" would freeze the widget on a
+    # percentage that never moves again.
+    if [ "$(jq -r 'if type == "object" then (.state // "") else "" end' <<<"$progress" 2>/dev/null)" = "running" ]; then
+      updated="$(jq -r '.updated_epoch // empty' <<<"$progress" 2>/dev/null)"
+      updated="$(number_or "$updated" 0)"
+      age=$((epoch - updated))
+      [ "$updated" -gt 0 ] && [ "$age" -lt "$STALE_PROGRESS_SECONDS" ] && running=true
+    fi
+
+    if systemctl --user --quiet is-active "omarchy-pbs-backup@$name.service" 2>/dev/null; then
+      running=true
+    fi
+
+    out="$(jq -c \
+      --arg name "$name" \
+      --arg label "$(jq -r --arg n "$name" '.groups[] | select(.name==$n) | .display_name // $n' <<<"$CONFIG_JSON")" \
+      --argjson stored "$(jq -c --arg n "$name" '.groups[$n] // {}' <<<"$status")" \
+      --arg schedule "$(jq -r --arg n "$name" '.groups[] | select(.name==$n) | .schedule // ""' <<<"$CONFIG_JSON")" \
+      --argjson running "$running" \
+      --argjson progress "$progress" \
+      '. + [$stored + {name:$name, display_name:$label,
+                       schedule:(if $schedule == "" then null else $schedule end),
+                       running:$running,
+                       progress:(if $running then $progress else null end)}]' <<<"$out")"
+  done < <(cfg '.groups[].name')
+
+  jq -nc --argjson g "$out" --argjson installed "$installed" \
+    '{ok:true, configured:true, invalid:false, units_installed:$installed, groups:$g}'
+}
+
+cmd_check_reachable() {
+  # Lightweight reachability probe: try snapshot list for the first group and
+  # discard the body. The widget treats a successful exit as "the server
+  # answered" without waiting for a full backup.
+  pbs_context
+  local name; name="$(cfg '.groups[0].name')"
+  select_destination "$name"
+  local bid; bid="$(group_backup_id)"
+  pbs_run snapshot list "$bid" \
+    --output-format json >/dev/null 2>&1
+}
+
+cmd_snapshots() {
+  JSON_MODE=1
+  parse_options "$@"
+  load_config
+  select_destination "$OPT_DEST"
+  pbs_context
+
+  local bid out
+  bid="$(group_backup_id)"
+
+  out="$(pbs_run snapshot list "$bid" --output-format json 2>/dev/null \
+    | head -c "$((SNAPSHOT_BYTE_CAP + 1))")"
+  if over_byte_cap "$out" "$SNAPSHOT_BYTE_CAP"; then
+    jq -nc '{ok:false, error:"snapshot list too large to read safely", snapshots:[]}'; return 0
+  fi
+  [ -n "$out" ] || { jq -nc '{ok:false, error:"could not read snapshots", snapshots:[]}'; return 0; }
+
+  jq -c '{ok:true, snapshots:([.[] | {id: ("\(.backup-type // "host")/\(.backup-id)/\(.time)"),
+                                 short_id: .["backup-id"],
+                                 time: .time,
+                                 size: .size}] | reverse)}' <<<"$out" 2>/dev/null ||
+    jq -nc '{ok:false, error:"unexpected snapshot output", snapshots:[]}'
+}
+
+cmd_archives() {
+  JSON_MODE=1
+  parse_options "$@"
+  load_config
+  select_destination "$OPT_DEST"
+  pbs_context
+  validate_snapshot_id "$OPT_SNAPSHOT"
+
+  local out
+  out="$(pbs_run snapshot files "$OPT_SNAPSHOT" --output-format json 2>/dev/null \
+    | head -c "$((SNAPSHOT_BYTE_CAP + 1))")"
+  if over_byte_cap "$out" "$SNAPSHOT_BYTE_CAP"; then
+    jq -nc '{ok:false, error:"archive list too large to read safely", archives:[]}'; return 0
+  fi
+  [ -n "$out" ] ||
+    { jq -nc --arg s "$OPT_SNAPSHOT" '{ok:false, error:"could not read archives", archives:[]}'; return 0; }
+
+  jq -c '{ok:true, archives:[.[] | {name: .filename, size: .size, type: .filetype}]}' <<<"$out" 2>/dev/null ||
+    jq -nc '{ok:false, error:"unexpected archives output", archives:[]}'
+}
+
+# Build the mount path for a given snapshot, creating the per-group directory.
+mount_path_for() {
+  local snapshot_id="$1"
+  local safe; safe="$(printf '%s' "$snapshot_id" | tr '/' '-')"
+  printf '%s/%s/%s' "$MOUNT_ROOT" "$GROUP_NAME" "$safe"
+}
+
+cmd_mount() {
+  parse_options "$@"
+  load_config
+  select_destination "$OPT_DEST"
+  pbs_context
+  validate_snapshot_id "$OPT_SNAPSHOT"
+  validate_archive_name "$OPT_ARCHIVE"
+
+  local mp; mp="$(mount_path_for "$OPT_SNAPSHOT")"
+  mkdir -p -m 700 -- "$MOUNT_ROOT/$GROUP_NAME"
+
+  if mountpoint -q -- "$mp" 2>/dev/null; then
+    printf 'Already mounted at %s\n' "$mp"
+    return 0
+  fi
+  mkdir -p -- "$mp"
+  # PBS mounts FUSE; the process blocks until umount. We do not background it:
+  # the plugin keeps the mount alive for the lifetime of the panel and unmounts
+  # on close. Leaving it backgrounded orphans the mount when the user closes
+  # the panel.
+  pbs_run mount "$OPT_SNAPSHOT" "$OPT_ARCHIVE" "$mp" &
+  local mount_pid=$!
+  # Wait briefly for the mount to come up; PBS writes a "starting" line first.
+  local waited=0
+  while [ "$waited" -lt 50 ]; do
+    if mountpoint -q -- "$mp" 2>/dev/null; then
+      printf 'Mounted %s (%s) at %s\n' "$OPT_SNAPSHOT" "$OPT_ARCHIVE" "$mp"
+      return 0
+    fi
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  # Mount never came up. Check whether the PBS process is still alive; if it
+  # died with an error, we have it.
+  if ! kill -0 "$mount_pid" 2>/dev/null; then
+    wait "$mount_pid" 2>/dev/null
+    rmdir -- "$mp" 2>/dev/null
+    die "mount failed; proxmox-backup-client exited"
+  fi
+  die "mount did not appear within 5s; check PBS connectivity"
+}
+
+cmd_unmount() {
+  parse_options "$@"
+  load_config
+  select_destination "$OPT_DEST"
+
+  local dir="$MOUNT_ROOT/$GROUP_NAME"
+  [ -d "$dir" ] || return 0
+
+  shopt -s nullglob
+  local mp
+  for mp in "$dir"/*; do
+    if mountpoint -q -- "$mp" 2>/dev/null; then
+      fusermount3 -u -- "$mp" 2>/dev/null \
+        || fusermount -u -- "$mp" 2>/dev/null \
+        || umount -l -- "$mp" 2>/dev/null
+    fi
+    rmdir -- "$mp" 2>/dev/null
+  done
+  shopt -u nullglob
+  rmdir -- "$dir" 2>/dev/null
+  return 0
+}
+
+# One find per directory; PBS has no ls-of-snapshot equivalent.
+cmd_ls() {
+  JSON_MODE=1
+  parse_options "$@"
+  local path="$OPT_PATH"
+  [ -n "$path" ] || path="/"
+  load_config
+  select_destination "$OPT_DEST"
+  pbs_context
+  validate_snapshot_id "$OPT_SNAPSHOT"
+  validate_archive_name "$OPT_ARCHIVE"
+  validate_absolute_path "$path"
+
+  local mp; mp="$(mount_path_for "$OPT_SNAPSHOT")"
+  if ! mountpoint -q -- "$mp" 2>/dev/null; then
+    jq -nc --arg p "$path" '{ok:false, error:"snapshot is not mounted; open Restore Files once to mount", path:$p, entries:[]}'
+    return 0
+  fi
+
+  local safe; safe="$(printf '%s' "$path" | sed 's#/$##')"
+  local target="$mp"
+  [ -n "$safe" ] && target="$mp/$safe"
+
+  if [ ! -d "$target" ]; then
+    jq -nc --arg p "$path" '{ok:false, error:"path does not exist in snapshot", path:$p, entries:[]}'
+    return 0
+  fi
+
+  # Strip the mount prefix to get the path back into archive-rooted form.
+  local entries_json entries_count truncated
+  entries_json="$(cd "$target" && find . -mindepth 1 -maxdepth 1 -printf '%y\0%f\0%s\0' \
+    | jq -Rs --argjson cap "$LS_ENTRY_CAP" '
+        split("\u0000")
+        | {rows: .}
+        | reduce range(0; length) as $i ({}; . + {
+            ($i | tostring): {
+              type: (.[$i] | if . == "d" then "dir" elif . == "l" then "link" else "file" end),
+              name: .[$i+1],
+              size: (if .[$i] == "d" then null else (.[$i+2] | tonumber? // 0) end),
+              path: (if .[$i] == "d" then .[$i+1] + "/" else .[$i+1] end)
+            }
+          })
+        | [.[range(0; length; 3)]]
+        | map(select(.name != null))
+        | {entries: .[0:$cap], total: length, truncated: (length > $cap)}'
+  )" || die "could not list directory"
+
+  entries_count="$(jq -r '.total' <<<"$entries_json" 2>/dev/null)"
+  truncated="$(jq -r '.truncated' <<<"$entries_json" 2>/dev/null)"
+
+  jq -nc \
+    --arg path "$path" \
+    --argjson entries "$(jq -c '.entries' <<<"$entries_json")" \
+    --argjson cap "$LS_ENTRY_CAP" \
+    --argjson truncated "$truncated" \
+    --arg mp "$mp" \
+    '{
+       ok: true,
+       path: $path,
+       entries: ([$entries[] | (if .name == "." or .name == ".." then empty else . end)
+                          | (if .type == "link" then .type = "file" else . end)])
+                  | sort_by([(if .type == "dir" then 0 else 1 end), (.name | ascii_downcase)])
+                  | (if (length > $cap) then .[0:$cap] else . end),
+       truncated: $truncated,
+       mount_point: $mp
+     }'
+}
+
+cmd_restore() {
+  JSON_MODE=1
+  parse_options "$@"
+  load_config
+  select_destination "$OPT_DEST"
+  pbs_context
+  validate_snapshot_id "$OPT_SNAPSHOT"
+  validate_archive_name "$OPT_ARCHIVE"
+  validate_absolute_path "$OPT_PATH"
+
+  local home="${HOME}"
+  local dest="$OPT_TARGET"
+  if [ -z "$dest" ]; then
+    # Build a date-stamped directory under ~/Restored. We use the snapshot's
+    # UTC timestamp (the last segment of the snapshot id) to avoid collisions
+    # between two restores of the same snapshot.
+    local ts; ts="$(printf '%s' "$OPT_SNAPSHOT" | awk -F/ '{print $NF}' | tr -d 'Z:' | tr 'T' '_' | tr -dc '0-9_')"
+    [ -n "$ts" ] || ts="$(date +%Y-%m-%d_%H%M%S)"
+    dest="$home/Restored/$ts/$(basename_safe "$OPT_PATH")"
+  fi
+  mkdir -p -- "$dest" || die "could not create $dest"
+
+  local -a restore_args
+  restore_args=(restore "$OPT_SNAPSHOT" "$OPT_ARCHIVE" "$dest")
+  if [ -n "$OPT_PATTERN" ]; then
+    restore_args+=(--pattern "$OPT_PATTERN")
+  fi
+
+  if pbs_run "${restore_args[@]}" >>"$LOG_FILE" 2>&1; then
+    jq -nc --arg t "$dest" '{ok:true, target:$t}'
+  else
+    local err; err="$(tail -n 5 "$LOG_FILE" 2>/dev/null || true)"
+    [ -n "$err" ] || err="restore failed"
+    jq -nc --arg e "$err" '{ok:false, error:$e}'
+  fi
+}
+
+cmd_log() {
+  parse_options "$@"
+  load_config
+  select_destination "$OPT_DEST"
+  local latest
+  latest="$(find "$LOG_ROOT/$GROUP_NAME" -maxdepth 1 -name '*.log' -type f 2>/dev/null | sort | tail -1)"
+  [ -n "$latest" ] || { printf 'no log files yet for %s\n' "$GROUP_NAME" >&2; return 1; }
+  printf '%s\n' "$latest"
+}
+
+cmd_report_failure() {
+  parse_options "$@"
+  load_config
+  select_destination "$OPT_DEST"
+  local last
+  last="$(jq -r --arg n "$GROUP_NAME" '.groups[$n].last_run.error // "unknown failure"' \
+    "$(load_status)" 2>/dev/null)"
+  notify -u critical -i "$(icon_for icon.svg dialog-warning)" \
+    "PBS backup failed" \
+    "${GROUP_NAME}: ${last}"
+}
+
+# ---------------------------------------------------------------------------
+# backup
+# ---------------------------------------------------------------------------
+
+cmd_backup() {
+  parse_options "$@"
+  load_config
+  select_destination "$OPT_DEST"
+  config_dir_secure
+  private_dir "$STATE_DIR" logs mounts
+  open_log
+  progress_init backup "omarchy-pbs-backup@$GROUP_NAME.service"
+
+  local started started_epoch cdm source base bid archive exclude_file pat
+  local -a sources missing backup_args
+  started="$(date -Iseconds)"
+  started_epoch="$(date +%s)"
+
+  pbs_context
+  cdm="$(cfg '.pbs.change_detection_mode // "metadata"')"
+  source="$(group '.source // empty')"
+  [ -n "$source" ] || source="$HOME"
+  source="$(expand_tilde "$source")"
+
+  # PBS backup-id: explicit or sanitized basename, matching the convention
+  # from the existing pbs-adhoc-backup.sh.
+  bid="$(group_backup_id)"
+  archive="${bid}.pxar"
+
+  if [ ! -e "$source" ]; then
+    die "source does not exist: $source"
+  fi
+
+  log_line "=== PBS Backup: backup to $GROUP_NAME ==="
+  log_line "Started:  $(date)"
+  log_line "Source:   $source"
+  log_line "Backup-id: $bid"
+  log_line "Archive:  $archive"
+  log_line "Log:      $LOG_FILE"
+  [ "$OPT_DRY_RUN" = "1" ] && log_line "DRY RUN: nothing will be written"
+  log_line ""
+
+  progress_write running pre 1
+
+  backup_args=(backup --json --change-detection-mode "$cdm" --backup-id "$bid")
+
+  while IFS= read -r pat; do
+    [ -n "$pat" ] && backup_args+=(--exclude "$pat")
+  done < <(jq -r '.excludes[]? // empty' <<<"$GROUP_JSON" 2>/dev/null)
+  while IFS= read -r pat; do
+    [ -n "$pat" ] && backup_args+=(--exclude "$pat")
+  done < <(jq -r '.excludes[]? // empty' <<<"$CONFIG_JSON" 2>/dev/null)
+
+  backup_args+=("${archive}:${source}")
+
+  progress_write running backup 1
+
+  # Stream stderr (PBS progress goes there) into the log and into a per-line
+  # parser. We can't easily map PBS status into our progress file the way
+  # restic --json let us, so we extract percentages with grep.
+  local exit_code result
+  set +e
+  pbs_run "${backup_args[@]}" 2> >(tee "$LOG_FILE" | parse_progress_stderr)
+  exit_code=$?
+  set -e
+  exit_code="$(number_or "$exit_code" 1)"
+
+  if [ "$exit_code" = "0" ]; then
+    log_line "Backup finished successfully"
+    result=ok
+  else
+    log_line "Backup failed (exit code $exit_code)"
+    result=failed
+  fi
+
+  if [ "$result" != "failed" ] && [ "$OPT_DRY_RUN" != "1" ]; then
+    progress_write running prune 1
+    run_prune "$bid"
+    prune_old_logs
+  fi
+
+  [ "$OPT_DRY_RUN" = "1" ] || record_status "$started" "$started_epoch" "$exit_code" "$result"
+
+  progress_write "$([ "$result" = "failed" ] && echo failed || echo done)" backup 1 \
+    "$(jq -nc --arg r "$result" '{percent:1.0, result:$r}')"
+
+  log_line ""
+  log_line "Finished: $(date)"
+
+  [ "$result" = "failed" ] && return 1
+  return 0
+}
+
+# Reads proxmox-backup-client's stderr: turns percentage lines into progress
+# file writes. PBS doesn't emit structured status JSON, so we approximate.
+parse_progress_stderr() {
+  local line
+  while IFS= read -r line; do
+    # Lines like " 50.00%" or "  100%". Take the first percentage we see.
+    if [[ "$line" =~ ([[:space:]]+)?([0-9]+(\.[0-9]+)?)\ ?% ]]; then
+      local pct; pct="${BASH_REMATCH[2]}"
+      progress_write running backup 0 \
+        "$(jq -nc --arg p "$pct" '{percent: ($p|tonumber / 100)}')"
+    fi
+  done
+}
+
+# Per-group prune. Failures here are logged but do not fail the backup.
+run_prune() {
+  local bid="$1"
+  [ "$(group '.prune_after_backup // true')" = "true" ] || return 0
+
+  log_line ""
+  log_line "Pruning old snapshots of $bid..."
+  if ! pbs_run prune "$bid" \
+        --keep-daily "$(keep_value daily 7)" \
+        --keep-weekly "$(keep_value weekly 4)" \
+        --keep-monthly "$(keep_value monthly 12)" \
+        --keep-yearly "$(keep_value yearly 3)" \
+        >>"$LOG_FILE" 2>&1; then
+    log_line "prune reported a problem, see the log"
+  fi
+  return 0
+}
+
+# Writes status.json after each backup run.
+record_status() {
+  local started="$1" started_epoch="$2" exit_code="$3" result="$4"
+  local status finished finished_epoch duration
+  finished="$(date -Iseconds)"
+  finished_epoch="$(date +%s)"
+  duration=$((finished_epoch - started_epoch))
+  status="$(load_status)"
+
+  local snapshot_count=0
+  local repo_size=0
+  if [ "$result" != "failed" ]; then
+    local bid; bid="$(group_backup_id)"
+    local raw
+    raw="$(pbs_run snapshot list "$bid" --output-format json 2>/dev/null \
+      | head -c "$((SNAPSHOT_BYTE_CAP + 1))" \
+      | jq -r 'length' 2>/dev/null)" || raw=""
+    snapshot_count="$(number_or "$raw" 0)"
+
+    # PBS has no cheap "repo size" command on the client side; the per-group
+    # size lives in snapshot list's `.size` field summed across snapshots.
+    raw="$(pbs_run snapshot list "$bid" --output-format json 2>/dev/null \
+      | head -c "$((SNAPSHOT_BYTE_CAP + 1))" \
+      | jq -r '[.[] | (.size // 0)] | add // 0' 2>/dev/null)" || raw=""
+    repo_size="$(number_or "$raw" 0)"
+  fi
+
+  jq \
+    --arg name "$GROUP_NAME" \
+    --arg display "$(cfg '.pbs.repository // empty')" \
+    --arg started "$started" \
+    --arg finished "$finished" \
+    --arg result "$result" \
+    --arg logfile "$LOG_FILE" \
+    --argjson duration "$duration" \
+    --argjson exit_code "$(number_or "$exit_code" 1)" \
+    --argjson count "$snapshot_count" \
+    --argjson size "$repo_size" \
+    '
+    .version = 1
+    | .groups[$name] = ((.groups[$name] // {}) + {
+        repository_display: $display,
+        last_run: {
+          started_at: $started,
+          finished_at: $finished,
+          duration_seconds: $duration,
+          exit_code: $exit_code,
+          result: $result,
+          log_file: $logfile
+        }
+      })
+    | if $result != "failed" then .groups[$name].last_success_at = $finished else . end
+    | if $count > 0 then .groups[$name].snapshot_count = $count else . end
+    | if $size > 0 then .groups[$name].repo_size_bytes = $size else . end
+    ' <<<"$status" | write_private "$STATUS_FILE" ||
+    printf 'could not update status.json\n' >&2
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# systemd units
+# ---------------------------------------------------------------------------
+
+unit_path_env() { printf '%s' "$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"; }
+
+service_unit() {
+  cat <<UNIT
+[Unit]
+Description=PBS backup to %i
+Documentation=https://github.com/teohz/omarchy-pbs-backup
+After=network-online.target
+Wants=network-online.target
+OnFailure=omarchy-pbs-backup-failed@%i.service
+
+[Service]
+Type=oneshot
+Environment=PATH=$(unit_path_env)
+ExecStart=$SELF backup --dest %i
+TimeoutStartSec=${BACKUP_TIMEOUT_SECONDS}s
+Nice=10
+IOSchedulingClass=idle
+UNIT
+}
+
+failed_unit() {
+  cat <<UNIT
+[Unit]
+Description=Report a failed PBS backup of %i
+
+[Service]
+Type=oneshot
+Environment=PATH=$(unit_path_env)
+ExecStart=$SELF report-failure --dest %i
+UNIT
+}
+
+timer_unit() {
+  local schedule="$1" delay="$2"
+  cat <<UNIT
+[Unit]
+Description=PBS backup timer for ${GROUP_NAME}
+
+[Timer]
+Unit=omarchy-pbs-backup@${GROUP_NAME}.service
+OnCalendar=${schedule}
+Persistent=true
+RandomizedDelaySec=${delay}
+
+[Install]
+WantedBy=timers.target
+UNIT
+}
+
+write_unit() {
+  local filename="$1"
+  local content="$2"
+  local path="$SYSTEMD_DIR/$filename"
+  local existing=""
+  readable_file "$path" && existing="$(cat -- "$path")"
+  if [ "$existing" = "$content" ]; then
+    printf '  = %s (unchanged)\n' "$filename"
+    return 0
+  fi
+  printf '%s\n' "$content" > "$path.tmp.$$" && mv -f -- "$path.tmp.$$" "$path" ||
+    die "could not write $path"
+  if [ -n "$existing" ]; then printf '  ~ %s\n' "$filename"; else printf '  + %s\n' "$filename"; fi
+}
+
+cmd_install() {
+  load_config
+  mkdir -p -- "$SYSTEMD_DIR"
+
+  printf 'Writing units into %s:\n' "$SYSTEMD_DIR"
+  write_unit "omarchy-pbs-backup@.service" "$(service_unit)"
+  write_unit "omarchy-pbs-backup-failed@.service" "$(failed_unit)"
+
+  local names=() name schedule delay unit path filename keep
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    schedule="$(jq -r --arg n "$name" '.groups[] | select(.name==$n) | .schedule // ""' <<<"$CONFIG_JSON")"
+    [ -n "$schedule" ] || continue
+    delay="$(jq -r --arg n "$name" '.groups[] | select(.name==$n) | .randomized_delay // "15m"' <<<"$CONFIG_JSON")"
+    names+=("$name")
+    GROUP_NAME="$name"
+    write_unit "omarchy-pbs-backup@$name.timer" "$(timer_unit "$schedule" "$delay")"
+  done < <(cfg '.groups[].name')
+
+  # Timers for groups that no longer exist, or that lost their schedule:
+  # remove them, otherwise a backup keeps running for a group nobody has
+  # configured any more.
+  shopt -s nullglob
+  for path in "$SYSTEMD_DIR"/omarchy-pbs-backup@*.timer; do
+    filename="$(basename -- "$path")"
+    keep=0
+    for name in ${names+"${names[@]}"}; do
+      [ "$filename" = "omarchy-pbs-backup@$name.timer" ] && keep=1
+    done
+    [ "$keep" = "1" ] && continue
+    systemctl --user disable --now "$filename" >/dev/null 2>&1
+    rm -f -- "$path"
+    printf '  - %s (no longer configured)\n' "$filename"
+  done
+  shopt -u nullglob
+
+  systemctl --user daemon-reload
+
+  if [ "${#names[@]}" -eq 0 ]; then
+    printf '\nNo group has a schedule, so nothing runs automatically.\n'
+    printf 'Set a schedule in config.json (for example "Sun *-*-* 03:00:00") and run this again.\n'
+    return 0
+  fi
+
+  local failures=0
+  for name in "${names[@]}"; do
+    unit="omarchy-pbs-backup@$name.timer"
+    if systemctl --user enable --now "$unit" >/dev/null 2>&1; then
+      printf '  enabled %s\n' "$unit"
+    else
+      printf '  could not enable %s\n' "$unit" >&2
+      failures=$((failures + 1))
+    fi
+  done
+
+  printf '\nNext run:\n'
+  systemctl --user list-timers 'omarchy-pbs-backup@*.timer' --no-pager
+
+  [ "$failures" = "0" ]
+}
+
+# ---------------------------------------------------------------------------
+# config create
+# ---------------------------------------------------------------------------
+
+cmd_config() {
+  local action="${1:-}"
+  [ "$#" -gt 0 ] && shift
+
+  case "$action" in
+    create)
+      config_dir_secure
+      mkdir -p -- "$CONFIG_DIR"
+
+      if readable_file "$CONFIG_FILE"; then
+        printf '%s already exists; opening it in the editor instead.\n' "$CONFIG_FILE" >&2
+      else
+        cat > "$CONFIG_FILE.tmp.$$" <<JSON
+{
+  "pbs": {
+    "repository": "CHANGEME-user@pbs!backup@pbs-host.example.com:datastore-name",
+    "auth_id": "CHANGEME-user@pbs",
+    "fingerprint": "CHANGEME-aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99:aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99",
+    "change_detection_mode": "metadata"
+  },
+  "namespace": "CHANGEME-your-name/your-group",
+  "groups": [
+    {
+      "name": "external-drive",
+      "display_name": "External drive",
+      "source": "/mnt/external-drive",
+      "schedule": "Sun *-*-* 03:00:00",
+      "randomized_delay": "10m",
+      "backup_id": null,
+      "excludes": [
+        "*/.cache/",
+        "*/.local/share/Trash/"
+      ],
+      "retention": { "daily": 7, "weekly": 4, "monthly": 12, "yearly": 3 },
+      "prune_after_backup": true
+    }
+  ]
+}
+JSON
+        chmod 600 -- "$CONFIG_FILE.tmp.$$"
+        mv -f -- "$CONFIG_FILE.tmp.$$" "$CONFIG_FILE" ||
+          die "could not write $CONFIG_FILE"
+        printf 'Wrote %s. Open it in the editor and replace the CHANGEME- placeholders.\n' "$CONFIG_FILE" >&2
+      fi
+
+      omarchy-launch-editor -- "$CONFIG_FILE" 2>/dev/null \
+        || xdg-open "$CONFIG_FILE" >/dev/null 2>&1 \
+        || printf 'Open %s in your editor.\n' "$CONFIG_FILE"
+      ;;
+    *)
+      die "usage: config create"
+      ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
+
+usage() {
+  cat <<TEXT
+omarchy-pbs-backup $VERSION
+
+  status --json                       status of every group (no network)
+  groups [--json]                     list every group and when it last ran
+  key set|show                        manage the PBS secret
+  backup --dest <group> [--dry-run]   run a backup of one group
+  snapshots --dest <group> --json     list snapshots for a group
+  archives --dest <group> --snapshot <id> --json
+  mount --dest <group> --snapshot <id> --archive <name>
+  unmount --dest <group>
+  ls --dest <group> --snapshot <id> --archive <name> --path </abs> --json
+  restore --dest <group> --snapshot <id> --archive <name> [--target <dir>] [--pattern <glob>]
+  install                             (re)write and enable the systemd units
+  config create                       write a starter configuration
+  log [--dest <group>]                path of the most recent log file
+  report-failure --dest <group>       send a notification for a failed run
+TEXT
+}
+
+main() {
+  need jq
+  need proxmox-backup-client
+  local command="${1:-}"
+  [ "$#" -gt 0 ] && shift
+
+  case "$command" in
+    status) cmd_status "$@" ;;
+    groups) cmd_groups "$@" ;;
+    key) cmd_key "$@" ;;
+    backup) cmd_backup "$@" ;;
+    snapshots) cmd_snapshots "$@" ;;
+    archives) cmd_archives "$@" ;;
+    mount) cmd_mount "$@" ;;
+    unmount) cmd_unmount "$@" ;;
+    ls) cmd_ls "$@" ;;
+    restore) cmd_restore "$@" ;;
+    install) cmd_install "$@" ;;
+    report-failure) cmd_report_failure "$@" ;;
+    log) cmd_log "$@" ;;
+    config) cmd_config "$@" ;;
+    --version) printf 'omarchy-pbs-backup %s\n' "$VERSION" ;;
+    ""|help|--help|-h) usage ;;
+    *) printf 'unknown command: %s\n' "$command" >&2; usage >&2; return 2 ;;
+  esac
+}
+
+main "$@"
