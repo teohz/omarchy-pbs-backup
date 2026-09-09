@@ -631,6 +631,32 @@ test_panel_close_unmounts() {
   TESTS_RUN=$((TESTS_RUN + 1))
 }
 
+# D2 fix: PbsBackupStore.groupDetail formatted `last_run.data_added_bytes`
+# into the per-group detail line, but record_status never writes that
+# field — the formatter was a stub. Either populate the field from PBS
+# output or drop the formatter. We drop it; the snapshot_count is still
+# informative, and adding the field back requires a reliable PBS output
+# parser that's out of scope.
+test_group_detail_no_data_added_bytes() {
+  local fn
+  fn="$(awk '
+    /^  function groupDetail\(/ { inside=1 }
+    inside { print }
+    inside && /^  }$/ { inside=0 }
+  ' PbsBackupStore.qml)"
+  # Strip comments before grepping — the function may mention the field
+  # in a // note explaining why it was removed, which is fine.
+  local body
+  body="$(printf '%s\n' "$fn" | sed 's|//.*||')"
+  if printf '%s\n' "$body" | grep -q 'data_added_bytes'; then
+    printf '  FAIL  groupDetail still references dead data_added_bytes\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  else
+    printf '  ok    groupDetail no longer references dead data_added_bytes\n'
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
 # Run all tests.
 main() {
   printf 'omarchy-pbs-backup tests\n'
@@ -665,6 +691,7 @@ main() {
   test_confirm_cancel_clears_target
   test_cmd_config_create_detaches_editor
   test_panel_close_unmounts
+  test_group_detail_no_data_added_bytes
   printf -- '------------------------\n'
   printf '%d checks run, %d failed\n' "$TESTS_RUN" "$TESTS_FAILED"
   [ "$TESTS_FAILED" = "0" ]

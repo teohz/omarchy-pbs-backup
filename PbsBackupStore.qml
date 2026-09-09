@@ -581,12 +581,13 @@ Singleton {
       return "No successful backup yet"
     }
     if (!g.last_run) return ""
-    var parts = []
+    // Previously this also formatted `data_added_bytes` ("X added last run"),
+    // but record_status never wrote that field — PBS does not expose it
+    // in a form the CLI can rely on across versions. The snapshot_count
+    // alone is the honest per-run metric the CLI can guarantee.
     if (g.snapshot_count)
-      parts.push(g.snapshot_count + " snapshot" + (g.snapshot_count === 1 ? "" : "s"))
-    if (g.last_run.data_added_bytes)
-      parts.push(humanBytes(g.last_run.data_added_bytes) + " added last run")
-    return parts.join(" \u00b7 ")
+      return g.snapshot_count + " snapshot" + (g.snapshot_count === 1 ? "" : "s")
+    return ""
   }
 
   function groupFailed(g) {
