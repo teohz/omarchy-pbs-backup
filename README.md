@@ -152,7 +152,7 @@ PBS each group's snapshots will land.
 |---|---|
 | `~/.config/omarchy-pbs-backup/config.json` | Plugin config (mode 600). |
 | `~/.config/omarchy-pbs-backup/.secret` | PBS password / API token secret (mode 600). |
-| `~/.local/state/omarchy-pbs-backup/status.json` | Per-group last-run, snapshot_count, repo_size_bytes. |
+| `~/.local/state/omarchy-pbs-backup/status.json` | Per-group: `backup_id`, `namespace`, `repository_display`, last-run (started/finished/duration/exit/result/log_file), `last_success_at`, `snapshot_count`, `repo_size_bytes`. The identity fields tell you exactly which PBS path a group's backups land on. |
 | `~/.local/state/omarchy-pbs-backup/progress-<group>.json` | Live progress (10s TTL on the bar widget's "running" detection). |
 | `~/.local/state/omarchy-pbs-backup/logs/<group>/<date>.log` | Per-run log files, 30-day retention. |
 | `~/.local/state/omarchy-pbs-backup/mounts/<group>/<snapshot-id-with-hyphens>/` | FUSE mount points; the snapshot id's slashes are flattened to `-` so each lives in one flat directory. Unmounted on panel close. |
