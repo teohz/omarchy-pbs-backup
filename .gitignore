@@ -9,3 +9,33 @@ state/
 *~
 *.swp
 *.bak
+*.kate-swp
+
+# Cache directories
+.cache/
+.qtc_clangd/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Build / package outputs
+build/
+dist/
+*.egg-info/
+
+# Language toolchains (future-proofing)
+node_modules/
+__pycache__/
+*.pyc
+
+# Editor / IDE (per-user, not part of the plugin)
+.vscode/
+.idea/
+
+# Qt / QML compiled cache
+*.qmlc
+.qmlls.ini
+
+# OS metadata
+.DS_Store
+Thumbs.db

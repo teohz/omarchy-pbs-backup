@@ -177,6 +177,56 @@ ls ~/.local/state/omarchy-pbs-backup/mounts/external-drive/...
 ~/.config/omarchy/plugins/teohz.pbs-backup/bin/omarchy-pbs-backup log --dest external-drive
 ```
 
+## Required PBS permissions
+
+The plugin needs PBS-side ACLs on the user or API token. Without these,
+specific operations fail with `permission check failed` and the backup
+itself still succeeds (prune / restore / mount errors are logged but
+do not fail the backup).
+
+| Operation | Required ACL | Where it's checked |
+|---|---|---|
+| `backup` | `Datastore.Backup` | before upload |
+| `mount` (for the restore browser) | `Datastore.Audit` (or read on the snapshot) | before FUSE mount |
+| `snapshot list`, `snapshot files`, `catalog shell` | `Datastore.Audit` | before listing |
+| `restore` | `Datastore.Audit` (read snapshot) + write access to the local target dir | before extraction |
+| `prune` (post-backup retention) | `Datastore.Modify` + `Datastore.Prune` | before retention run |
+
+A real failure from the user's session:
+
+```
+Pruning old snapshots of backup...
+Error: permission check failed - missing Datastore.Modify|Datastore.Prune
+  on /datastore/pbs-truenas
+prune reported a problem, see the log
+```
+
+Backup completed in 0.26s (the previous snapshot was reused entirely — 254
+unchanged files, 0 changed), but the prune step that follows it could not
+proceed. The script exits 0; the next nightly run tries again.
+
+### Granting the ACLs (PBS admin UI)
+
+Administration → Permissions → ACLs → add the user or API token with:
+
+| Path | Privileges |
+|---|---|
+| `/datastore/<datastore-name>` | `Datastore.Backup`, `Datastore.Modify`, `Datastore.Prune`, `Datastore.Audit` |
+| `/datastore/<datastore-name>/<namespace>` | (same; per-namespace scope if you want to limit by namespace) |
+
+For API tokens (recommended over password auth for this kind of use),
+PBS shows the auth-id as `<user>@<realm>!<token-name>` — grant the
+privileges to that auth-id, not the bare user.
+
+### Skipping prune entirely
+
+If you can't or don't want to grant `Datastore.Prune`, set
+`groups[].prune_after_backup: false` in `config.json`. PBS can run
+retention server-side via Prune Jobs (Administration → Datastore →
+Prune & GC), so the plugin will still take successful backups; PBS
+itself handles thinning old snapshots. The `retention` block in
+`config.json` is then ignored — PBS's Prune Job settings win.
+
 ## Coexistence with the system timer
 
 The plugin's user-scope timer and the existing system-scope
