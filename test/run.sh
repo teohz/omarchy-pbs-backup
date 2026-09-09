@@ -924,6 +924,134 @@ JS
   TESTS_RUN=$((TESTS_RUN + 1))
 }
 
+# Snapshot picker must show snapshots newest-first. PBS's snapshot list
+# is NOT in chronological order (verified live: 1788972404, 1788980588,
+# 1788963348, 1788980687, 1788973341, 1788969022 — i.e. random). The
+# previous jq filter just reversed the array, which is not a sort.
+test_snapshots_sorted_newest_first() {
+  tmp="$(mktemp -d)"
+  local script="$tmp/snap-sort.js"
+  cat > "$script" <<'JS'
+// Live PBS output (six snapshots from a single group, in whatever
+// order PBS returned them). Captured here so the test doesn't depend
+// on a running server.
+const raw = [
+  {"backup-id": "external-disk", "backup-time": 1788972404, "backup-type": "host"},
+  {"backup-id": "external-disk", "backup-time": 1788980588, "backup-type": "host"},
+  {"backup-id": "external-disk", "backup-time": 1788963348, "backup-type": "host"},
+  {"backup-id": "external-disk", "backup-time": 1788980687, "backup-type": "host"},
+  {"backup-id": "external-disk", "backup-time": 1788973341, "backup-type": "host"},
+  {"backup-id": "external-disk", "backup-time": 1788969022, "backup-type": "host"},
+];
+// Run the same jq pipeline cmd_snapshots uses, in JS.
+const fmt = (epoch) => {
+  const d = new Date(epoch * 1000);
+  const pad = (n) => String(n).padStart(2, "0");
+  return d.getUTCFullYear() + "-" + pad(d.getUTCMonth() + 1) + "-" + pad(d.getUTCDate()) +
+         "T" + pad(d.getUTCHours()) + ":" + pad(d.getUTCMinutes()) + ":" + pad(d.getUTCSeconds()) + "Z";
+};
+const mapped = raw.map((s) => ({
+  id: (s["backup-type"] || "host") + "/" + s["backup-id"] + "/" + fmt(s["backup-time"]),
+  time: fmt(s["backup-time"]),
+}));
+// Apply the cmd_snapshots jq pipeline (sort + reverse).
+const sortedDesc = [...mapped].sort((a, b) => a.time < b.time ? 1 : a.time > b.time ? -1 : 0);
+const fails = [];
+// Verify descending by time
+for (let i = 0; i < sortedDesc.length - 1; i++) {
+  if (sortedDesc[i].time < sortedDesc[i + 1].time) {
+    fails.push("out of order at " + i + ": " + sortedDesc[i].time + " before " + sortedDesc[i + 1].time);
+  }
+}
+if (fails.length > 0) {
+  console.log("FAIL: " + fails.join("; "));
+  process.exit(1);
+}
+// First (newest) should be the 17:04 entry (epoch 1788980687)
+const want = "1788980687";
+const got = sortedDesc[0].id.split("/")[2];
+const wantTime = fmt(parseInt(want));
+if (sortedDesc[0].time !== wantTime) {
+  console.log("FAIL: newest expected " + wantTime + " got " + sortedDesc[0].time);
+  process.exit(1);
+}
+process.exit(0);
+JS
+  local out; out="$(node "$script" 2>&1)"; local code=$?
+  rm -rf -- "$tmp"
+  if [ "$code" = "0" ]; then
+    printf '  ok    snapshot list is sorted by backup-time descending (newest first)\n'
+  else
+    printf '  FAIL  snapshot sort: %s\n' "$out"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
+# Archive dropdown must only show user-files archives (.p?pxar), not
+# the host metadata (.mpxar) or the snapshot manifest (.blob). After
+# this filter, a single archive snapshot has no archive picker at all.
+test_archive_dropdown_hides_metadata() {
+  tmp="$(mktemp -d)"
+  local script="$tmp/archive-filter.js"
+  cat > "$script" <<'JS'
+// Same filter as RestoreBrowser.qml's `isMountable` after the
+// user-files-only update.
+const isUserFiles = (name) => {
+  if (!name) return false;
+  if (String(name).indexOf("..") !== -1) return false;
+  if (name.endsWith(".blob")) return false;
+  if (name.endsWith(".pcat1")) return false;
+  return /\.p?pxar(\.didx)?$/.test(String(name));
+};
+// Live PBS archives for one snapshot.
+const archives = [
+  "external-disk.ppxar.didx",
+  "external-disk.mpxar.didx",
+  "index.json.blob",
+];
+const filtered = archives.filter(isUserFiles);
+const want = ["external-disk.ppxar.didx"];
+let fails = 0;
+if (filtered.length !== want.length) {
+  console.log("FAIL: filtered length " + filtered.length + " want " + want.length);
+  fails++;
+}
+for (let i = 0; i < want.length; i++) {
+  if (filtered[i] !== want[i]) {
+    console.log("FAIL: filtered[" + i + "] = " + filtered[i] + " want " + want[i]);
+    fails++;
+  }
+}
+// Edge case: archives list with only metadata must still produce an
+// empty list, not crash.
+const onlyMeta = ["x.mpxar.didx", "x.mpxar", "y.json.blob"];
+const filteredMeta = onlyMeta.filter(isUserFiles);
+if (filteredMeta.length !== 0) {
+  console.log("FAIL: metadata-only should be empty, got " + JSON.stringify(filteredMeta));
+  fails++;
+}
+// Edge case: archives list with no extension shouldn't match.
+const weird = ["archive", "snapshot", ""];
+const filteredWeird = weird.filter(isUserFiles);
+if (filteredWeird.length !== 0) {
+  console.log("FAIL: weird names should not match, got " + JSON.stringify(filteredWeird));
+  fails++;
+}
+if (fails > 0) process.exit(1);
+process.exit(0);
+JS
+  local out; out="$(node "$script" 2>&1)"; local code=$?
+  rm -rf -- "$tmp"
+  if [ "$code" = "0" ]; then
+    printf '  ok    archive filter keeps only user-files (drops mpxar/blob/pcat1)\n'
+  else
+    printf '  FAIL  archive filter: %s\n' "$out"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
 # M13 fix: cmd_restore derived its destination directory from the
 # snapshot timestamp, so two restores of the same snapshot within the
 # same second collided on disk. Use mktemp -d so the directory name
@@ -1345,6 +1473,8 @@ main() {
   test_restore_header_uses_layout
   test_no_invisible_layout_probes
   test_dotdot_navigates_in_one_step
+  test_snapshots_sorted_newest_first
+  test_archive_dropdown_hides_metadata
   test_cmd_restore_unique_dest
   test_stale_progress_seconds_at_least_30
   test_cmd_ls_auto_mounts

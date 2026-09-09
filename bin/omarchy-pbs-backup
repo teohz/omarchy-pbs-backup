@@ -798,7 +798,7 @@ cmd_snapshots() {
       short_id: .["backup-id"],
       time: (.["backup-time"] | gmtime | strftime("%Y-%m-%dT%H:%M:%SZ")),
       size: .size
-    }] | reverse)}' <<<"$out" 2>/dev/null ||
+    }] | sort_by(.time) | reverse)}' <<<"$out" 2>/dev/null ||
     jq -nc '{ok:false, error:"unexpected snapshot output", snapshots:[]}'
 }
 
