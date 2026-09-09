@@ -970,6 +970,124 @@ test_cmd_ls_jq_does_not_index_accumulator() {
   TESTS_RUN=$((TESTS_RUN + 1))
 }
 
+# A1: `backup` with no args and no --all must error with a helpful
+# message instead of silently defaulting to the first group.
+test_backup_requires_dest_or_all() {
+  setup_isolated_home
+  mkdir -p -- "$XDG_CONFIG_HOME/omarchy-pbs-backup"
+  cp "$FIXTURES/config-valid.json" "$XDG_CONFIG_HOME/omarchy-pbs-backup/config.json"
+  local out code
+  out="$("$SCRIPT" backup 2>&1)"
+  code=$?
+  rm -rf -- "$tmp"
+  if [ "$code" = "0" ]; then
+    printf '  FAIL  bare backup exited 0 (expected non-zero)\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  else
+    printf '  ok    bare backup exits non-zero\n'
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+
+  if printf '%s' "$out" | grep -q -- '--dest.*--all'; then
+    printf '  ok    bare backup error mentions --dest or --all\n'
+  else
+    printf '  FAIL  bare backup error does not mention --dest or --all: %s\n' "$out"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
+# A2: usage() must list the new --all flag.
+test_backup_help_lists_all_flag() {
+  local help
+  help="$("$SCRIPT" help 2>&1)"
+  if printf '%s' "$help" | grep -q '\-\-all'; then
+    printf '  ok    usage mentions --all\n'
+  else
+    printf '  FAIL  usage does not mention --all\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
+# A3 & A4: backup --all iterates every group; --all --dry-run skips
+# the actual pbs_run invocation. Sourcing the script in a subshell
+# lets us override pbs_run and feed a 2-group config without needing
+# a real PBS server.
+test_backup_all_iterates_and_dry_run() {
+  setup_isolated_home
+  mkdir -p -- "$XDG_CONFIG_HOME/omarchy-pbs-backup"
+  cat > "$XDG_CONFIG_HOME/omarchy-pbs-backup/config.json" <<JSON
+{
+  "pbs": { "repository": "x@y:z" },
+  "namespace": "ns/test",
+  "groups": [
+    { "name": "alpha", "source": "/tmp/alpha-source", "schedule": "" },
+    { "name": "beta",  "source": "/tmp/beta-source",  "schedule": "" }
+  ]
+}
+JSON
+  mkdir -p /tmp/alpha-source /tmp/beta-source
+
+  local marker; marker="$tmp/marker.txt"
+  # Source the script in a subshell. main() runs at the end of the
+  # file but with no positional args it just prints usage — redirect
+  # to /dev/null. Then override pbs_run so we can see exactly what
+  # cmd_backup invokes.
+  (
+    source "$SCRIPT" >/dev/null 2>&1 || true
+
+    pbs_run() {
+      printf '%s\n' "$*" >> "$marker"
+      return 0
+    }
+
+    # First pass: --all must invoke `pbs_run backup ...` once per group.
+    rm -f -- "$marker"
+    cmd_backup --all
+    local count; count="$(grep -c '^backup ' "$marker" 2>/dev/null || echo 0)"
+    if [ "$count" = "2" ]; then
+      printf '  ok    backup --all runs backup once per group (%d)\n' "$count"
+    else
+      printf '  FAIL  backup --all ran backup %d times (want 2). Marker:\n%s\n' "$count" "$(cat "$marker")"
+      TESTS_FAILED=$((TESTS_FAILED + 1))
+    fi
+    TESTS_RUN=$((TESTS_RUN + 1))
+
+    # Second pass: --all --dry-run must NOT invoke pbs_run backup at all.
+    rm -f -- "$marker"
+    cmd_backup --all --dry-run
+    count="$(grep -c '^backup ' "$marker" 2>/dev/null || echo 0)"
+    if [ "$count" = "0" ]; then
+      printf '  ok    backup --all --dry-run skips pbs_run backup\n'
+    else
+      printf '  FAIL  backup --all --dry-run ran backup %d times\n' "$count"
+      TESTS_FAILED=$((TESTS_FAILED + 1))
+    fi
+    TESTS_RUN=$((TESTS_RUN + 1))
+  )
+  rm -rf -- "$tmp"
+  rmdir /tmp/alpha-source /tmp/beta-source 2>/dev/null || true
+}
+
+# A5: --all and --dest are mutually exclusive — passing both must error.
+test_backup_all_with_dest_errors() {
+  setup_isolated_home
+  mkdir -p -- "$XDG_CONFIG_HOME/omarchy-pbs-backup"
+  cp "$FIXTURES/config-valid.json" "$XDG_CONFIG_HOME/omarchy-pbs-backup/config.json"
+  local out code
+  out="$("$SCRIPT" backup --all --dest external-drive 2>&1)"
+  code=$?
+  rm -rf -- "$tmp"
+  if [ "$code" != "0" ] && printf '%s' "$out" | grep -qi 'mutually'; then
+    printf '  ok    --all --dest errors with mutually-exclusive message\n'
+  else
+    printf '  FAIL  --all --dest should error (code=%d): %s\n' "$code" "$out"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
 # Run all tests.
 main() {
   printf 'omarchy-pbs-backup tests\n'
@@ -1017,6 +1135,10 @@ main() {
   test_stale_progress_seconds_at_least_30
   test_cmd_ls_auto_mounts
   test_cmd_ls_jq_does_not_index_accumulator
+  test_backup_requires_dest_or_all
+  test_backup_help_lists_all_flag
+  test_backup_all_iterates_and_dry_run
+  test_backup_all_with_dest_errors
   printf -- '------------------------\n'
   printf '%d checks run, %d failed\n' "$TESTS_RUN" "$TESTS_FAILED"
   [ "$TESTS_FAILED" = "0" ]

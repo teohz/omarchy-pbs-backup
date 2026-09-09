@@ -258,6 +258,7 @@ declare -a POSITIONAL=()
 parse_options() {
   OPT_DEST=""; OPT_SNAPSHOT=""; OPT_ARCHIVE=""; OPT_PATH=""
   OPT_TARGET=""; OPT_PATTERN=""; OPT_DRY_RUN=0; OPT_JSON=0
+  OPT_ALL=0
   POSITIONAL=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -269,6 +270,7 @@ parse_options() {
       --pattern) OPT_PATTERN="${2:-}"; shift 2 || shift ;;
       --dry-run) OPT_DRY_RUN=1; shift ;;
       --json) OPT_JSON=1; shift ;;
+      --all) OPT_ALL=1; shift ;;
       *) POSITIONAL+=("$1"); shift ;;
     esac
   done
@@ -1051,7 +1053,46 @@ cmd_report_failure() {
 cmd_backup() {
   parse_options "$@"
   load_config
-  select_destination "$OPT_DEST"
+
+  if [ "${OPT_ALL:-0}" = "1" ] && [ -n "$OPT_DEST" ]; then
+    die "--all and --dest are mutually exclusive"
+  fi
+
+  if [ "${OPT_ALL:-0}" = "1" ]; then
+    # Run every configured group sequentially. Each group's success or
+    # failure is reported; the overall command exits non-zero only if
+    # any group failed, so one bad source doesn't block the others.
+    local failures=0 name
+    while IFS= read -r name; do
+      [ -n "$name" ] || continue
+      printf '>>> backing up %s\n' "$name" >&2
+      if ! run_backup_for_group "$name"; then
+        printf '!!! backup of %s failed\n' "$name" >&2
+        failures=$((failures + 1))
+      fi
+    done < <(cfg '.groups[].name')
+    if [ "$failures" -gt 0 ]; then
+      printf '%s group(s) failed\n' "$failures" >&2
+      return 1
+    fi
+    return 0
+  fi
+
+  if [ -z "$OPT_DEST" ]; then
+    die "specify --dest <group> or --all"
+  fi
+
+  run_backup_for_group "$OPT_DEST"
+}
+
+# Per-group backup work. Invoked once by cmd_backup, or once per group
+# when cmd_backup --all is in effect. Sets GROUP_NAME / GROUP_JSON via
+# select_destination so the rest of the helpers (group, group_backup_id,
+# record_status, etc.) work unchanged.
+run_backup_for_group() {
+  local group_name="$1"
+
+  select_destination "$group_name"
   config_dir_secure
   private_dir "$STATE_DIR" logs mounts
   open_log
@@ -1470,6 +1511,7 @@ omarchy-pbs-backup $VERSION
   groups [--json]                     list every group and when it last ran
   key set|show                        manage the PBS secret
   backup --dest <group> [--dry-run]   run a backup of one group
+  backup --all [--dry-run]            run a backup of every configured group
   snapshots --dest <group> --json     list snapshots for a group
   archives --dest <group> --snapshot <id> --json
   mount --dest <group> --snapshot <id> --archive <name>
