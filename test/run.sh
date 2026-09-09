@@ -426,6 +426,22 @@ test_cmd_groups_repo_naming() {
   TESTS_RUN=$((TESTS_RUN + 1))
 }
 
+# M12 fix: pbs_context must not chmod SECRET_FILE on every call. The
+# permission is set when the secret is written (cmd_key set / write_private)
+# and on the secure setup path (config_dir_secure). Re-running chmod on
+# every PBS-touching command is noise.
+test_pbs_context_no_chmod_secret() {
+  local fn
+  fn="$(awk '/^pbs_context\(\)/,/^}/' "$SCRIPT")"
+  if printf '%s\n' "$fn" | grep -qE 'chmod.*SECRET_FILE'; then
+    printf '  FAIL  pbs_context still chmods SECRET_FILE on every call\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  else
+    printf '  ok    pbs_context does not chmod SECRET_FILE on every call\n'
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
 # Run all tests.
 main() {
   printf 'omarchy-pbs-backup tests\n'
@@ -451,6 +467,7 @@ main() {
   test_groups_table_no_duplicate_count
   test_record_status_calls_snapshot_list_once
   test_cmd_groups_repo_naming
+  test_pbs_context_no_chmod_secret
   printf -- '------------------------\n'
   printf '%d checks run, %d failed\n' "$TESTS_RUN" "$TESTS_FAILED"
   [ "$TESTS_FAILED" = "0" ]

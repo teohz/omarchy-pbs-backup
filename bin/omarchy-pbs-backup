@@ -395,7 +395,6 @@ pbs_context() {
       die "no secret at $SECRET_FILE, run: omarchy-pbs-backup key set"
     [ -f "$SECRET_FILE" ] && [ ! -L "$SECRET_FILE" ] ||
       die "$SECRET_FILE must be a regular file (not a symlink)"
-    chmod 600 -- "$SECRET_FILE" 2>/dev/null
     export PBS_PASSWORD_FILE="$SECRET_FILE"
   fi
 
