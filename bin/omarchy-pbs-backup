@@ -388,19 +388,22 @@ pbs_context() {
     export PBS_PASSWORD_FILE="$SECRET_FILE"
   fi
 
-  local repository auth_id fingerprint namespace
+  local repository fingerprint namespace
   repository="$(cfg '.pbs.repository // empty')"
   [ -n "$repository" ] || [ -n "${PBS_REPOSITORY:-}" ] ||
     die "pbs.repository is not set in config.json"
 
-  auth_id="$(cfg '.pbs.auth_id // empty')"
   fingerprint="$(cfg '.pbs.fingerprint // empty')"
   namespace="$(cfg '.namespace // empty')"
 
   # Only override env vars that aren't already set, so tests can pin values
   # via the environment without the script clobbering them.
+  # PBS_AUTH_ID is intentionally NOT set here: the user@realm prefix in
+  # PBS_REPOSITORY already carries the auth identity (or user@realm!tokenname
+  # for API tokens). A separate auth_id field would be redundant; the env
+  # var overrides stay available for the edge case of needing to
+  # authenticate differently from the repo string implies.
   [ -n "$repository" ] && [ -z "${PBS_REPOSITORY:-}" ] && export PBS_REPOSITORY="$repository"
-  [ -n "$auth_id" ] && [ -z "${PBS_AUTH_ID:-}" ] && export PBS_AUTH_ID="$auth_id"
   [ -n "$fingerprint" ] && [ -z "${PBS_FINGERPRINT:-}" ] && export PBS_FINGERPRINT="$fingerprint"
   [ -n "$namespace" ] && [ -z "${PBS_NAMESPACE:-}" ] && export PBS_NAMESPACE="$namespace"
 
@@ -1032,7 +1035,7 @@ cmd_backup() {
 
   progress_write running pre 1
 
-  backup_args=(backup --json --change-detection-mode "$cdm" --backup-id "$bid")
+  backup_args=(backup --change-detection-mode "$cdm" --backup-id "$bid")
 
   while IFS= read -r pat; do
     [ -n "$pat" ] && backup_args+=(--exclude "$pat")
@@ -1043,10 +1046,19 @@ cmd_backup() {
 
   backup_args+=("${archive}:${source}")
 
+  if [ "$OPT_DRY_RUN" = "1" ]; then
+    log_line "DRY RUN: would run: proxmox-backup-client ${backup_args[*]}"
+    progress_write done backup 1 \
+      "$(jq -nc '{percent:0.0, result:"dry-run"}')"
+    log_line ""
+    log_line "Finished: $(date)"
+    return 0
+  fi
+
   progress_write running backup 1
 
   # Stream stderr (PBS progress goes there) into the log and into a per-line
-  # parser. We can't easily map PBS status into our progress file the way
+  # parser. We can't easily map PBS status into the progress file the way
   # restic --json let us, so we extract percentages with grep.
   local exit_code result
   set +e
@@ -1322,7 +1334,6 @@ cmd_config() {
 {
   "pbs": {
     "repository": "CHANGEME-user@pbs!backup@pbs-host.example.com:datastore-name",
-    "auth_id": "CHANGEME-user@pbs",
     "fingerprint": "CHANGEME-aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99:aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99",
     "change_detection_mode": "metadata"
   },

@@ -147,7 +147,7 @@ test_archives_json_parsing() {
 }
 
 test_status_with_state_file() {
-  setup_isolated_home
+  local tmp; tmp="$(setup_isolated_home)"
   mkdir -p -- "$XDG_CONFIG_HOME/omarchy-pbs-backup"
   cp "$FIXTURES/config-valid.json" "$XDG_CONFIG_HOME/omarchy-pbs-backup/config.json"
   mkdir -p -- "$XDG_STATE_HOME/omarchy-pbs-backup"
@@ -156,6 +156,46 @@ test_status_with_state_file() {
   assert_contains "with state → snapshot count carried" '"snapshot_count":24' "$out"
   assert_contains "with state → last_run.result" '"result":"ok"' "$out"
   rm -rf -- "$tmp"
+}
+
+test_backup_no_json_flag() {
+  # PBS `backup` has no --json output mode (the original time-machine plugin
+  # used restic, which did). The script used to pass --json to
+  # proxmox-backup-client backup, which made every backup fail with
+  # "parameter verification failed - 'json': missing parameter value".
+  # Catch regression by looking for the actual flag passed to a subcommand
+  # -- not just any mention of --json in a comment.
+  if grep -E '^[[:space:]]*backup_args=\([^)]*backup[[:space:]]+--json' "$SCRIPT" >/dev/null 2>&1; then
+    printf '  FAIL  backup_args pass --json to backup (PBS rejects it)\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  else
+    printf '  ok    backup_args do not pass --json to backup\n'
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
+test_pbs_context_uses_repository_string() {
+  # PBS_AUTH_ID should not be set by pbs_context; the auth identity lives in
+  # PBS_REPOSITORY. Grep the source for an `export PBS_AUTH_ID=` line inside
+  # pbs_context -- if it comes back, the field was reintroduced.
+  if grep -n 'export PBS_AUTH_ID=' "$SCRIPT" >/dev/null 2>&1; then
+    printf '  FAIL  pbs_context exports PBS_AUTH_ID (should be redundant)\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  else
+    printf '  ok    pbs_context does not export PBS_AUTH_ID\n'
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+
+  # The config-valid fixture does NOT carry an auth_id field, and the
+  # starter config (cmd_config create) does NOT emit one either. Make sure
+  # no recent change reintroduced it.
+  if grep -q '"auth_id"' "$FIXTURES/config-valid.json"; then
+    printf '  FAIL  config-valid fixture has auth_id\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  else
+    printf '  ok    config-valid fixture has no auth_id\n'
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
 }
 
 test_sanitize_for_pbs_id() {
@@ -237,6 +277,8 @@ main() {
   test_groups_no_groups_field
   test_status_valid_config_no_state
   test_status_with_state_file
+  test_backup_no_json_flag
+  test_pbs_context_uses_repository_string
   test_snapshots_json_parsing
   test_snapshots_empty_list
   test_archives_json_parsing

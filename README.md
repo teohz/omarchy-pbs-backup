@@ -99,7 +99,6 @@ users who prefer PBS's own interactive UI over the bar widget's.
 {
   "pbs": {
     "repository": "backup@pbs!backup@pbs-host.example.com:datastore-name",
-    "auth_id": "backup@pbs",
     "fingerprint": "aa:bb:cc:dd:...:aa:bb:cc:dd:...:aa:bb:cc:dd:...",
     "change_detection_mode": "metadata"
   },
@@ -125,8 +124,7 @@ users who prefer PBS's own interactive UI over the bar widget's.
 
 | Field | Purpose |
 |---|---|
-| `pbs.repository` | Full `PBS_REPOSITORY` string (server, datastore, namespace embedded). |
-| `pbs.auth_id` | `PBS_AUTH_ID`. Either `user@realm` for password auth, or `user@realm!tokenname` for an API token. |
+| `pbs.repository` | Full `PBS_REPOSITORY` string. Carries the server, datastore, namespace, and auth identity (`user@realm` for password auth, `user@realm!tokenname` for an API token). Same shape your `pbs-adhoc-backup.sh` uses. |
 | `pbs.fingerprint` | TLS cert fingerprint (sha256). Required for self-signed PBS certs. |
 | `pbs.change_detection_mode` | `legacy`, `data`, or `metadata`. Default `metadata`. |
 | `namespace` | PBS namespace. Top-level for now; per-group override may come later. |
