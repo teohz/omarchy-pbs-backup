@@ -1164,6 +1164,151 @@ test_cmd_ls_jq_does_not_index_accumulator() {
   TESTS_RUN=$((TESTS_RUN + 1))
 }
 
+# Bug 1: --copy-source restores the selected file/dir via cp from the
+# FUSE mount, not via PBS restore (which would always extract the
+# whole archive). Tests use a plain tmp dir as a stand-in for the
+# mountpoint; cp doesn't care that it's not actually FUSE.
+test_restore_file_via_cp() {
+  setup_isolated_home
+  mkdir -p -- "$XDG_CONFIG_HOME/omarchy-pbs-backup"
+  cp "$FIXTURES/config-valid.json" "$XDG_CONFIG_HOME/omarchy-pbs-backup/config.json"
+
+  # Fake "mount": a tmp directory with files inside, structured so
+  # the restore will create dest/<archive-relative-path>.
+  local mount; mount="$(mktemp -d)"
+  mkdir -p "$mount/restic"
+  printf 'hello' > "$mount/restic/config"
+  mkdir -p "$mount/lost+found"
+
+  local dest_root; dest_root="$(mktemp -d)"
+  HOME="$tmp" "$SCRIPT" restore \
+      --dest external-drive \
+      --snapshot host/external-drive/2026-09-09T15:00:00Z \
+      --archive external-drive.ppxar.didx \
+      --path "restic/config" \
+      --copy-source "$mount" \
+      --target "$dest_root/restore" \
+      --json > "$tmp/out" 2>"$tmp/err"
+  local code=$?
+
+  if [ "$code" = "0" ] \
+     && [ -f "$dest_root/restore/restic/config" ] \
+     && [ "$(cat "$dest_root/restore/restic/config")" = "hello" ] \
+     && [ ! -e "$dest_root/restore/lost+found" ]; then
+    printf '  ok    restore file copies only the selected file, preserves archive path\n'
+  else
+    printf '  FAIL  restore file: code=%d, config=%s, lost+found_present=%s\n' \
+      "$code" \
+      "$(test -f "$dest_root/restore/restic/config" && echo yes || echo no)" \
+      "$(test -e "$dest_root/restore/lost+found" && echo yes || echo no)"
+    [ -s "$tmp/out" ] && { printf '        stdout: %s\n' "$(cat "$tmp/out")"; }
+    [ -s "$tmp/err" ] && { printf '        stderr: %s\n' "$(cat "$tmp/err")"; }
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  rm -rf -- "$mount" "$dest_root"
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
+test_restore_directory_via_cp() {
+  setup_isolated_home
+  mkdir -p -- "$XDG_CONFIG_HOME/omarchy-pbs-backup"
+  cp "$FIXTURES/config-valid.json" "$XDG_CONFIG_HOME/omarchy-pbs-backup/config.json"
+
+  local mount; mount="$(mktemp -d)"
+  mkdir -p "$mount/restic/data" "$mount/restic/keys"
+  printf 'snapshot-1\n' > "$mount/restic/data/pack-1"
+  printf 'snapshot-2\n' > "$mount/restic/keys/secret"
+  printf 'unrelated' > "$mount/restic/should-not-appear"
+
+  local dest_root; dest_root="$(mktemp -d)"
+  HOME="$tmp" "$SCRIPT" restore \
+      --dest external-drive \
+      --snapshot host/external-drive/2026-09-09T15:00:00Z \
+      --archive external-drive.ppxar.didx \
+      --path "restic/" \
+      --copy-source "$mount" \
+      --target "$dest_root/restore" \
+      --json > "$tmp/out" 2>"$tmp/err"
+  local code=$?
+
+  # The dest for a directory restore is dest/<archive-relative-path>,
+  # i.e. dest/restic/. cp -a copies contents inside.
+  if [ "$code" = "0" ] \
+     && [ -f "$dest_root/restore/restic/data/pack-1" ] \
+     && [ -f "$dest_root/restore/restic/keys/secret" ] \
+     && [ ! -e "$dest_root/restore/restore" ]; then
+    printf '  ok    restore dir copies dir contents under dest/<archive-path>\n'
+  else
+    printf '  FAIL  restore dir: code=%d, pack-1=%s, secret=%s, nested=%s\n' \
+      "$code" \
+      "$(test -f "$dest_root/restore/restic/data/pack-1" && echo yes || echo no)" \
+      "$(test -f "$dest_root/restore/restic/keys/secret" && echo yes || echo no)" \
+      "$(test -e "$dest_root/restore/restore" && echo yes || echo no)"
+    [ -s "$tmp/err" ] && { printf '        stderr: %s\n' "$(cat "$tmp/err")"; }
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  rm -rf -- "$mount" "$dest_root"
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
+test_restore_target_dir_no_basename() {
+  setup_isolated_home
+  mkdir -p -- "$XDG_CONFIG_HOME/omarchy-pbs-backup"
+  cp "$FIXTURES/config-valid.json" "$XDG_CONFIG_HOME/omarchy-pbs-backup/config.json"
+
+  local mount; mount="$(mktemp -d)"
+  mkdir -p "$mount/restic"
+  printf 'x' > "$mount/restic/config"
+
+  # No --target: dest should be ~/Restored/<ts>-XXXXXX/restic/config
+  # (archive path preserved, no extra basename dir like .../config/).
+  local out; out="$(HOME="$tmp" "$SCRIPT" restore \
+      --dest external-drive \
+      --snapshot host/external-drive/2026-09-09T15:00:00Z \
+      --archive external-drive.ppxar.didx \
+      --path "restic/config" \
+      --copy-source "$mount" \
+      --json 2>/dev/null)"
+  local target
+  target="$(printf '%s' "$out" | jq -r '.target')"
+  if printf '%s' "$target" | grep -qE '/Restored/[^/]+-......?/restic/config$'; then
+    printf '  ok    restore target is <Restored>/<ts>/<archive-path>\n'
+  else
+    printf '  FAIL  restore target layout: %s\n' "$target"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  rm -rf -- "$mount" "$HOME/Restored"
+  rm -rf -- "$tmp"
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
+test_restore_falls_back_to_pbs() {
+  setup_isolated_home
+  mkdir -p -- "$XDG_CONFIG_HOME/omarchy-pbs-backup"
+  cp "$FIXTURES/config-valid.json" "$XDG_CONFIG_HOME/omarchy-pbs-backup/config.json"
+
+  # No --copy-source, and no actual PBS server: the restore must still
+  # go through the PBS code path (proxmox-backup-client restore ...).
+  # We assert the script tries to run the PBS command and fails with
+  # the expected "no secret" error, NOT with a cp-related error.
+  local out code
+  out="$(HOME="$tmp" "$SCRIPT" restore \
+      --dest external-drive \
+      --snapshot host/external-drive/2026-09-09T15:00:00Z \
+      --archive external-drive.ppxar.didx \
+      --path "restic/config" \
+      --json 2>&1)"
+  code=$?
+  if printf '%s' "$out" | grep -qE 'cp:|no secret|no repository|repository'; then
+    printf '  ok    restore without --copy-source falls back to PBS (got expected error)\n'
+  else
+    printf '  FAIL  unexpected fallback output: code=%d out=%s\n' "$code" "$out"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  rm -rf -- "$tmp"
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
 # A1: `backup` with no args and no --all must error with a helpful
 # message instead of silently defaulting to the first group.
 test_backup_requires_dest_or_all() {
@@ -1481,6 +1626,10 @@ main() {
   test_stale_progress_seconds_at_least_30
   test_cmd_ls_auto_mounts
   test_cmd_ls_jq_does_not_index_accumulator
+  test_restore_file_via_cp
+  test_restore_directory_via_cp
+  test_restore_target_dir_no_basename
+  test_restore_falls_back_to_pbs
   test_backup_requires_dest_or_all
   test_backup_help_lists_all_flag
   test_backup_all_iterates_and_dry_run

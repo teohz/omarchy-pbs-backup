@@ -19,7 +19,7 @@
 #   omarchy-pbs-backup mount --dest GROUP --snapshot ID --archive NAME
 #   omarchy-pbs-backup unmount --dest GROUP
 #   omarchy-pbs-backup ls --dest GROUP --snapshot ID --archive NAME --path P --json
-#   omarchy-pbs-backup restore --dest GROUP --snapshot ID --archive NAME [--target DIR] [--pattern PAT]
+#   omarchy-pbs-backup restore --dest GROUP --snapshot ID --archive NAME [--target DIR] [--pattern PAT] [--copy-source MOUNT]
 #   omarchy-pbs-backup install                       (re)write and enable systemd units
 #   omarchy-pbs-backup report-failure --dest GROUP
 #   omarchy-pbs-backup config create                 write a starter configuration
@@ -259,6 +259,7 @@ parse_options() {
   OPT_DEST=""; OPT_SNAPSHOT=""; OPT_ARCHIVE=""; OPT_PATH=""
   OPT_TARGET=""; OPT_PATTERN=""; OPT_DRY_RUN=0; OPT_JSON=0
   OPT_ALL=0
+  OPT_COPY_SOURCE=""
   POSITIONAL=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -268,6 +269,7 @@ parse_options() {
       --path) OPT_PATH="${2:-}"; shift 2 || shift ;;
       --target) OPT_TARGET="${2:-}"; shift 2 || shift ;;
       --pattern) OPT_PATTERN="${2:-}"; shift 2 || shift ;;
+      --copy-source) OPT_COPY_SOURCE="${2:-}"; shift 2 || shift ;;
       --dry-run) OPT_DRY_RUN=1; shift ;;
       --json) OPT_JSON=1; shift ;;
       --all) OPT_ALL=1; shift ;;
@@ -986,7 +988,6 @@ cmd_restore() {
   parse_options "$@"
   load_config
   select_destination "$OPT_DEST"
-  pbs_context
   validate_snapshot_id "$OPT_SNAPSHOT"
   validate_archive_name "$OPT_ARCHIVE"
   validate_archive_path "$OPT_PATH"
@@ -1003,10 +1004,47 @@ cmd_restore() {
     mkdir -p -- "$home/Restored"
     local dir; dir="$(mktemp -d "${home}/Restored/${ts}-XXXXXX")" ||
       die "could not create restore directory under $home/Restored"
-    dest="$dir/$(basename_safe "$OPT_PATH")"
+    dest="$dir"
   fi
   mkdir -p -- "$dest" || die "could not create $dest"
 
+  # Fast path: if the QML passed --copy-source (the active FUSE mount),
+  # restore via `cp` from the mount. The QML keeps the mount alive for
+  # the panel session, so we don't need to spin up a new PBS connection;
+  # we just read the selected file/dir out of the FUSE filesystem. The
+  # archive-relative path is preserved under dest so the user sees the
+  # file where they expected it (e.g. dest/restic/config, not the
+  # whole archive). Falls back to PBS restore when --copy-source is
+  # missing or doesn't point at a real directory.
+  if [ -n "$OPT_COPY_SOURCE" ] && [ -d "$OPT_COPY_SOURCE" ]; then
+    local stripped="${OPT_PATH%/}"
+    local source="$OPT_COPY_SOURCE/$stripped"
+    if [ ! -e "$source" ]; then
+      jq -nc --arg p "$OPT_PATH" '{ok:false, error:"path not found in snapshot: \"$p\""}'
+      return 0
+    fi
+    if [ -d "$source" ]; then
+      # Directory restore: nest the directory under dest so the user
+      # sees e.g. ~/Restored/<ts>/restic/{contents,...}.
+      cp -a "$source" "$dest/" \
+        || { jq -nc '{ok:false, error:"cp failed"}'; return 0; }
+    else
+      # File restore: --parents preserves the archive-relative path,
+      # so ~/Restored/<ts>/restic/config lands at dest/restic/config.
+      # cp's --parents treats the source as relative to cwd, so cd
+      # into the mount root; the source is then the stripped path.
+      (cd "${OPT_COPY_SOURCE%/}" && cp --parents -a "$stripped" "$dest/") \
+        || { jq -nc '{ok:false, error:"cp failed"}'; return 0; }
+    fi
+    local target="$dest${stripped:+/$stripped}"
+    jq -nc --arg t "$target" '{ok:true, target:$t}'
+    return 0
+  fi
+
+  # Slow path: no mount to copy from. Run the PBS restore (which will
+  # always extract the entire archive — the QML uses --copy-source so
+  # the fast path is the common case).
+  pbs_context
   local -a restore_args
   restore_args=(restore "$OPT_SNAPSHOT" "$OPT_ARCHIVE" "$dest")
   if [ -n "$OPT_PATTERN" ]; then
@@ -1017,7 +1055,7 @@ cmd_restore() {
   # script-wide LOG_FILE is empty and `>>""` would fail with
   # "No such file or directory". Always open our own log so the QML
   # gets a meaningful error tail on failure.
-  local restore_log="$dir/$(date +%Y-%m-%d_%H%M%S).log"
+  local restore_log="${dest%/}/$(date +%Y-%m-%d_%H%M%S).log"
   : > "$restore_log"
   chmod 600 -- "$restore_log"
 
@@ -1523,7 +1561,8 @@ omarchy-pbs-backup $VERSION
   mount --dest <group> --snapshot <id> --archive <name>
   unmount --dest <group>
   ls --dest <group> --snapshot <id> --archive <name> --path </abs> --json
-  restore --dest <group> --snapshot <id> --archive <name> [--target <dir>] [--pattern <glob>]
+  restore --dest <group> --snapshot <id> --archive <name> [--target <dir>] [--pattern <glob>] [--copy-source <mount>]
+  --copy-source MOUNT      copy from a local FUSE mount (selected file/dir only); falls back to PBS restore
   install                             (re)write and enable the systemd units
   config create                       write a starter configuration
   log [--dest <group>]                path of the most recent log file
