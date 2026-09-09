@@ -1088,6 +1088,59 @@ test_backup_all_with_dest_errors() {
   TESTS_RUN=$((TESTS_RUN + 1))
 }
 
+# Issue 2: --path to cmd_ls / cmd_restore is archive-relative (the
+# QML passes paths like 'restic/config', 'testing/', no leading /).
+# The old validate_absolute_path rejected any path without a leading
+# slash. After the fix the validator must:
+#   - accept 'restic', 'restic/config', '/restic', '/', 'testing/'
+#   - reject paths containing '..' (path-traversal safety)
+#   - default to '/' when called with an empty string (cmd_ls's
+#     `[ -n "$path" ] || path="/"` keeps that behaviour either way,
+#     but we still want the validator itself to handle empty input
+#     safely in case a future caller skips the default)
+test_archive_path_validation() {
+  # Standalone test — no isolated home needed, just a scratch dir for
+  # the wrapper script.
+  tmp="$(mktemp -d)"
+  local fn; fn="$(awk '/^validate_(absolute|archive)_path\(\)/,/^}/' "$SCRIPT")"
+  if [ -z "$fn" ]; then
+    printf '  FAIL  could not extract path validator from script\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    TESTS_RUN=$((TESTS_RUN + 1))
+    rm -rf -- "$tmp"
+    return
+  fi
+  local wrap="$tmp/wrap.sh"
+  printf '%s\n' 'die() { printf "DIE:%s\n" "$*" >&2; exit 99; }' > "$wrap"
+  printf '%s\n' "$fn" >> "$wrap"
+  local out code
+
+  for ok in 'restic' 'restic/config' '/restic' '/' 'testing/' 'a' ''; do
+    out="$(bash -c "source '$wrap'; validate_archive_path $(printf %q "$ok")" 2>&1)"
+    code=$?
+    if [ "$code" = "0" ]; then
+      printf '  ok    validate_archive_path accepts %q\n' "$ok"
+    else
+      printf '  FAIL  validate_archive_path rejects %q (code=%d): %s\n' "$ok" "$code" "$out"
+      TESTS_FAILED=$((TESTS_FAILED + 1))
+    fi
+    TESTS_RUN=$((TESTS_RUN + 1))
+  done
+
+  for bad in '../etc/passwd' 'restic/../etc' 'a/../b' '/../etc'; do
+    out="$(bash -c "source '$wrap'; validate_archive_path $(printf %q "$bad")" 2>&1)"
+    code=$?
+    if [ "$code" != "0" ] && printf '%s' "$out" | grep -q '\.\.'; then
+      printf '  ok    validate_archive_path rejects %q\n' "$bad"
+    else
+      printf '  FAIL  validate_archive_path accepted %q (code=%d)\n' "$bad" "$code"
+      TESTS_FAILED=$((TESTS_FAILED + 1))
+    fi
+    TESTS_RUN=$((TESTS_RUN + 1))
+  done
+  rm -rf -- "$tmp"
+}
+
 # Run all tests.
 main() {
   printf 'omarchy-pbs-backup tests\n'
@@ -1139,6 +1192,7 @@ main() {
   test_backup_help_lists_all_flag
   test_backup_all_iterates_and_dry_run
   test_backup_all_with_dest_errors
+  test_archive_path_validation
   printf -- '------------------------\n'
   printf '%d checks run, %d failed\n' "$TESTS_RUN" "$TESTS_FAILED"
   [ "$TESTS_FAILED" = "0" ]

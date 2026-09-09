@@ -557,10 +557,16 @@ validate_archive_name() {
   return 0
 }
 
-validate_absolute_path() {
+validate_archive_path() {
+  # cmd_ls and cmd_restore take a path relative to the archive root.
+  # Leading slash is allowed (means "the archive root") but not
+  # required — the QML passes archive-relative paths like 'restic/'
+  # or 'restic/config' without one. The only safety check that
+  # matters here is path-traversal: reject anything with '..' so
+  # a bad path can't escape the archive through a symlink.
   case "$1" in
-    /*) return 0 ;;
-    *) die "path must be absolute: \"$1\"" ;;
+    *..*) die "path must not contain '..': \"$1\"" ;;
+    *) return 0 ;;
   esac
 }
 
@@ -915,7 +921,7 @@ cmd_ls() {
   pbs_context
   validate_snapshot_id "$OPT_SNAPSHOT"
   validate_archive_name "$OPT_ARCHIVE"
-  validate_absolute_path "$path"
+  validate_archive_path "$path"
 
   local mp; mp="$(mount_path_for "$OPT_SNAPSHOT")"
   if ! mountpoint -q -- "$mp" 2>/dev/null; then
@@ -983,7 +989,7 @@ cmd_restore() {
   pbs_context
   validate_snapshot_id "$OPT_SNAPSHOT"
   validate_archive_name "$OPT_ARCHIVE"
-  validate_absolute_path "$OPT_PATH"
+  validate_archive_path "$OPT_PATH"
 
   local home="${HOME}"
   local dest="$OPT_TARGET"
