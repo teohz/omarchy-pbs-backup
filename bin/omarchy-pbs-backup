@@ -53,7 +53,11 @@ BACKUP_TIMEOUT_SECONDS=36000      # 10h; matches the original time-machine cap
 LS_ENTRY_CAP=500
 SNAPSHOT_CAP=200
 PROGRESS_INTERVAL_MS=500
-STALE_PROGRESS_SECONDS=10
+# PBS may not emit a percentage line for tens of seconds while it uploads a
+# single large file. 10s was tight enough to flip the widget to "not
+# running" mid-backup; 30s survives large-file uploads while still
+# catching a writer that actually died.
+STALE_PROGRESS_SECONDS=30
 # proxmox-backup-client snapshot files can produce large JSON for a backup
 # with many archives; cap the read so a giant listing cannot blow up the
 # widget's memory.

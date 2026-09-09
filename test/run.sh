@@ -875,6 +875,25 @@ test_cmd_restore_unique_dest() {
   TESTS_RUN=$((TESTS_RUN + 1))
 }
 
+# M14 fix: a backup of a single large file can go >10s without PBS
+# emitting a percentage, which would have flipped the widget to "not
+# running" mid-backup. 30s gives PBS enough headroom on slow uploads
+# while still catching a writer that actually died.
+test_stale_progress_seconds_at_least_30() {
+  local val
+  val="$(grep -E '^STALE_PROGRESS_SECONDS=' "$SCRIPT" | head -1 | cut -d= -f2)"
+  if [ -z "$val" ]; then
+    printf '  FAIL  STALE_PROGRESS_SECONDS not set\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  elif [ "$val" -lt 30 ]; then
+    printf '  FAIL  STALE_PROGRESS_SECONDS=%s (need >=30 to survive large-file uploads)\n' "$val"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  else
+    printf '  ok    STALE_PROGRESS_SECONDS=%s\n' "$val"
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
 # Run all tests.
 main() {
   printf 'omarchy-pbs-backup tests\n'
@@ -919,6 +938,7 @@ main() {
   test_restore_header_uses_layout
   test_no_invisible_layout_probes
   test_cmd_restore_unique_dest
+  test_stale_progress_seconds_at_least_30
   printf -- '------------------------\n'
   printf '%d checks run, %d failed\n' "$TESTS_RUN" "$TESTS_FAILED"
   [ "$TESTS_FAILED" = "0" ]
