@@ -832,6 +832,20 @@ test_groups_table_column_separators() {
   TESTS_RUN=$((TESTS_RUN + 1))
 }
 
+# M6 fix: RestoreBrowser's snapshot-dropdown width was hard-coded with
+# magic numbers (46 / 38) that depended on the PanelActionButton size.
+# Refactor the header to a RowLayout so QML computes widths from
+# Layout.fillWidth / preferredWidth.
+test_restore_header_uses_layout() {
+  if grep -nE 'RowLayout|Layout\.fillWidth|Layout\.preferredWidth' RestoreBrowser.qml >/dev/null 2>&1; then
+    printf '  ok    restore header uses RowLayout (no magic width numbers)\n'
+  else
+    printf '  FAIL  restore header still has hand-computed widths\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
 # Run all tests.
 main() {
   printf 'omarchy-pbs-backup tests\n'
@@ -873,6 +887,7 @@ main() {
   test_pbs_context_honors_per_group_namespace
   test_record_status_records_identity
   test_groups_table_column_separators
+  test_restore_header_uses_layout
   printf -- '------------------------\n'
   printf '%d checks run, %d failed\n' "$TESTS_RUN" "$TESTS_FAILED"
   [ "$TESTS_FAILED" = "0" ]

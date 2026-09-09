@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Layouts
 import qs.Commons
 import qs.Ui
 
@@ -247,12 +248,12 @@ FocusScope {
     spacing: Style.space(10)
 
     // --- header ----------------------------------------------------------
-    Row {
+    RowLayout {
       width: parent.width
       spacing: Style.space(8)
 
       PanelActionButton {
-        anchors.verticalCenter: parent.verticalCenter
+        Layout.alignment: Qt.AlignVCenter
         iconText: "\uf060"
         tooltipText: "Back"
         foreground: root.foreground
@@ -262,8 +263,9 @@ FocusScope {
 
       // Which backup you are looking in. Only when there is a choice.
       Dropdown {
-        width: (parent.width - Style.space(46)) / 2
-        anchors.verticalCenter: parent.verticalCenter
+        Layout.fillWidth: true
+        Layout.preferredWidth: 1
+        Layout.alignment: Qt.AlignVCenter
         visible: PbsBackupStore.groups.length > 1
         label: ""
         showLabel: false
@@ -290,10 +292,9 @@ FocusScope {
       }
 
       Dropdown {
-        width: PbsBackupStore.groups.length > 1
-               ? (parent.width - Style.space(46)) / 2
-               : parent.width - Style.space(38)
-        anchors.verticalCenter: parent.verticalCenter
+        Layout.fillWidth: true
+        Layout.preferredWidth: 1
+        Layout.alignment: Qt.AlignVCenter
         label: ""
         showLabel: false
         foreground: root.foreground
