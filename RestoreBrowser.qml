@@ -446,7 +446,6 @@ FocusScope {
           entryName: String(modelData.name)
           entryType: String(modelData.type)
           entrySize: modelData.size
-          entryTime: modelData.mtime
           selected: root.selected && String(root.selected.path) === String(modelData.path)
           hasCursor: index === root.cursorIndex
           foreground: root.foreground

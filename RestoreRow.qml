@@ -17,7 +17,6 @@ Item {
   property string entryName: ""
   property string entryType: "file"
   property var entrySize: null
-  property var entryTime: null
   property bool selected: false
   // Keyboard cursor, distinct from mouse hover and from selection: three states
   // that can all be on different rows at once.

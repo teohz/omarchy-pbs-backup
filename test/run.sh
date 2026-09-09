@@ -683,6 +683,29 @@ test_readme_mount_path_matches_script() {
   TESTS_RUN=$((TESTS_RUN + 1))
 }
 
+# M8 fix: RestoreRow.entryTime was plumbed (RestoreBrowser.qml:442 passed
+# `modelData.mtime`) but cmd_ls never emitted mtime, so the field was
+# always null. The display logic in RestoreRow ignored null. Drop the
+# dead plumbing; if dates are wanted later, cmd_ls should emit mtime
+# and the row should render it.
+test_no_dead_entry_time() {
+  if grep -qE 'entryTime' RestoreRow.qml; then
+    printf '  FAIL  RestoreRow.qml still has dead entryTime\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  else
+    printf '  ok    RestoreRow.qml no longer has dead entryTime\n'
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+
+  if grep -qE 'entryTime:' RestoreBrowser.qml; then
+    printf '  FAIL  RestoreBrowser.qml still binds entryTime\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  else
+    printf '  ok    RestoreBrowser.qml no longer binds entryTime\n'
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
 # Run all tests.
 main() {
   printf 'omarchy-pbs-backup tests\n'
@@ -719,6 +742,7 @@ main() {
   test_panel_close_unmounts
   test_group_detail_no_data_added_bytes
   test_readme_mount_path_matches_script
+  test_no_dead_entry_time
   printf -- '------------------------\n'
   printf '%d checks run, %d failed\n' "$TESTS_RUN" "$TESTS_FAILED"
   [ "$TESTS_FAILED" = "0" ]
