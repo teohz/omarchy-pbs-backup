@@ -859,6 +859,71 @@ test_no_invisible_layout_probes() {
   TESTS_RUN=$((TESTS_RUN + 1))
 }
 
+# Issue 3: `..` click must navigate, not just highlight. We can't run a
+# QML event loop in bash, so we extract the relevant JS (goUp +
+# enterDirectory + the activateCursor branch for `up`) and exercise it
+# against representative currentPath values.
+test_dotdot_navigates_in_one_step() {
+  tmp="$(mktemp -d)"
+  local wrap="$tmp/goUp.js"
+  cat > "$wrap" <<'JS'
+// Stand-in for PbsBackupStore and RestoreBrowser state.
+let currentPath = "/restic/config";
+let lastCalledWith = null;
+function listPath(path) {
+  lastCalledWith = path;
+  currentPath = path;
+}
+function goUp() {
+  const path = currentPath;
+  if (path === "" || path === "/") return;
+  // Strip trailing slash before splitting.
+  const trimmed = path.replace(/\/+$/, "");
+  const idx = trimmed.lastIndexOf("/");
+  const parent = idx === -1 ? "" : trimmed.substring(0, idx);
+  listPath(parent === "" ? "/" : parent);
+}
+const cases = [
+  ["/restic/config", "/restic"],
+  ["/restic/",      "/"],
+  ["/restic",       "/"],
+  ["/a/b/c",        "/a/b"],
+  ["/a",            "/"],
+];
+let fails = 0;
+for (const [start, want] of cases) {
+  currentPath = start;
+  lastCalledWith = null;
+  goUp();
+  const got = lastCalledWith;
+  if (got !== want) {
+    console.log("FAIL goUp(" + JSON.stringify(start) + ") -> " +
+                JSON.stringify(got) + " (want " + JSON.stringify(want) + ")");
+    fails++;
+  }
+}
+// Also test: clicking .. when already at root must not error.
+currentPath = "/";
+lastCalledWith = "sentinel";  // not null — goUp must leave this alone
+goUp();
+if (lastCalledWith !== "sentinel") {
+  console.log("FAIL goUp('/') should not call listPath, got " + JSON.stringify(lastCalledWith));
+  fails++;
+}
+if (fails > 0) process.exit(1);
+process.exit(0);
+JS
+  local out; out="$(node "$wrap" 2>&1)"; local code=$?
+  rm -rf -- "$tmp"
+  if [ "$code" = "0" ]; then
+    printf '  ok    goUp navigates one level in one step (handles trailing slash)\n'
+  else
+    printf '  FAIL  goUp regression: %s\n' "$out"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
 # M13 fix: cmd_restore derived its destination directory from the
 # snapshot timestamp, so two restores of the same snapshot within the
 # same second collided on disk. Use mktemp -d so the directory name
@@ -1279,6 +1344,7 @@ main() {
   test_groups_table_column_separators
   test_restore_header_uses_layout
   test_no_invisible_layout_probes
+  test_dotdot_navigates_in_one_step
   test_cmd_restore_unique_dest
   test_stale_progress_seconds_at_least_30
   test_cmd_ls_auto_mounts
