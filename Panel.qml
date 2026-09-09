@@ -373,6 +373,18 @@ Panel {
             }
           }
 
+          MenuRow {
+            width: parent.width
+            visible: PbsBackupStore.configured && PbsBackupStore.hasLog
+            label: "Show Last Log\u2026"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            onClicked: {
+              PbsBackupStore.openLog()
+              root.close()
+            }
+          }
+
           PanelSeparator { width: parent.width; foreground: root.foreground }
 
           MenuRow {

@@ -205,16 +205,31 @@ Singleton {
 
   readonly property string homeDir: Quickshell.env("HOME")
 
-  function openLog() {
-    var path = null
+  // Any group with a log file we could open. Drives the visibility of the
+  // "Show Last Log" menu row.
+  readonly property bool hasLog: {
     for (var i = 0; i < groups.length; i++) {
-      if (groups[i].last_run && groups[i].last_run.log_file) {
-        path = groups[i].last_run.log_file
-        break
+      if (groups[i].last_run && groups[i].last_run.log_file) return true
+    }
+    return false
+  }
+
+  function openLog() {
+    // Pick the most recently finished log, not the first group's log.
+    // With multiple groups the first one in config order isn't necessarily
+    // the one the user wants to inspect.
+    var best = null
+    var bestTime = ""
+    for (var i = 0; i < groups.length; i++) {
+      var run = groups[i].last_run
+      if (!run || !run.log_file) continue
+      if (!best || (run.finished_at && run.finished_at > bestTime)) {
+        best = run.log_file
+        bestTime = run.finished_at || ""
       }
     }
-    if (!path) return
-    logProc.command = ["xdg-open", String(path)]
+    if (!best) return
+    logProc.command = ["xdg-open", String(best)]
     logProc.running = true
   }
 

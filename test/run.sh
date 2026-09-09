@@ -473,6 +473,32 @@ test_systemd_units_mode_644() {
   assert_eq "write_unit produces mode 644 under umask 077" "644" "$mode"
 }
 
+# M1 fix: openLog() was defined but never called from any QML file, and
+# the implementation always picked the first group's log, which is wrong
+# when multiple groups have logs. Fix: pick the most recently finished
+# one, and wire the function into a menu row in Panel.qml.
+test_openlog_picks_most_recent() {
+  local fn
+  fn="$(awk '/^  function openLog\(/,/^  }/' PbsBackupStore.qml)"
+  if printf '%s\n' "$fn" | grep -q 'finished_at'; then
+    printf '  ok    openLog considers finished_at to pick the most recent log\n'
+  else
+    printf '  FAIL  openLog does not consider finished_at (picks arbitrary group)\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
+test_openlog_wired_in_panel() {
+  if grep -nE 'PbsBackupStore\.openLog|openLog\(\)' Panel.qml >/dev/null 2>&1; then
+    printf '  ok    Panel.qml invokes PbsBackupStore.openLog\n'
+  else
+    printf '  FAIL  Panel.qml does not invoke PbsBackupStore.openLog\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
 # Run all tests.
 main() {
   printf 'omarchy-pbs-backup tests\n'
@@ -500,6 +526,8 @@ main() {
   test_cmd_groups_repo_naming
   test_pbs_context_no_chmod_secret
   test_systemd_units_mode_644
+  test_openlog_picks_most_recent
+  test_openlog_wired_in_panel
   printf -- '------------------------\n'
   printf '%d checks run, %d failed\n' "$TESTS_RUN" "$TESTS_FAILED"
   [ "$TESTS_FAILED" = "0" ]
