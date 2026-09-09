@@ -59,30 +59,24 @@ FocusScope {
   property var selected: null
   property string filter: ""
 
-  // PBS returns a manifest blob and a chunk index per archive. Only
-  // .pxar (user files) and .mpxar (host metadata) are directly
-  // mountable; the rest are PBS-internal bookkeeping the user should
-  // never have to choose between. Filter them out at the source so the
-  // dropdown, the auto-select, and the picker visibility all agree.
+  // PBS returns three things per snapshot: the snapshot manifest
+  // (`index.json.blob`), the user's files archive (`<name>.ppxar.didx`
+  // or `<name>.pxar`), and the host metadata archive (`<name>.mpxar.didx`).
+  // For restoring files we only ever want the first; the user should
+  // never have to choose between them. Filter at the source so the
+  // auto-select and the picker visibility agree.
   //
-  // PBS's chunk-index file is `<name>.ppxar.didx` (note the extra `p`),
-  // while the older direct archive name is `<name>.pxar`. Accept both,
-  // plus the analogous `<name>.mpxar(.didx)?` for host metadata.
+  // PBS's chunk-index file is `<name>.ppxar.didx` (note the extra `p`);
+  // the older direct archive name is `<name>.pxar`. Accept either.
   function isMountable(name) {
     if (!name) return false
     var n = String(name)
     if (n.indexOf("..") !== -1) return false
-    // Skip the snapshot manifest and the catalog file.
+    // Manifest, catalog, host metadata — not user files.
     if (n.endsWith(".blob")) return false
     if (n.endsWith(".pcat1")) return false
-    return /\.p?pxar(\.didx)?$/.test(n) || /\.mpxar(\.didx)?$/.test(n)
-  }
-
-  function archiveKind(name) {
-    var n = String(name)
-    if (/\.p?pxar(\.didx)?$/.test(n)) return "files"
-    if (/\.mpxar(\.didx)?$/.test(n)) return "host"
-    return ""
+    if (/\.mpxar(\.didx)?$/.test(n)) return false
+    return /\.p?pxar(\.didx)?$/.test(n)
   }
 
   readonly property var mountableArchives: {
@@ -381,9 +375,9 @@ FocusScope {
     RowLayout {
       width: parent.width
       spacing: Style.space(8)
-      // Show the picker when we have a selection, OR when there is more
-      // than one mountable archive to choose between.
-      visible: root.archiveName !== "" || root.mountableArchives.length > 1
+      // Only show when there's a real choice (>1 user-files archive).
+      // With one archive (the common case) the picker is just noise.
+      visible: root.mountableArchives.length > 1
 
       Text {
         Layout.alignment: Qt.AlignVCenter
@@ -403,19 +397,15 @@ FocusScope {
         fontFamily: root.fontFamily
         value: root.archiveName
         options: {
-          // Use the filtered list (.blob/.pcat1 hidden, only mountable
-          // archives shown) and label each entry by what it contains
-          // so the user doesn't have to guess which one holds their
-          // files.
+          // Use the filtered list. After the user-files-only filter,
+          // the only entry in practice is `<name>.ppxar.didx` (or
+          // `.pxar`), so this picker almost never shows in the UI;
+          // it's only visible when a snapshot happens to carry more
+          // than one user-files archive (rare).
           var list = []
           for (var i = 0; i < root.mountableArchives.length; i++) {
             var a = root.mountableArchives[i]
-            var kind = root.archiveKind(a.name)
-            var prefix = kind === "files" ? "Files"
-                       : kind === "host"  ? "Host metadata"
-                       : ""
-            var label = prefix ? (prefix + " \u2014 " + String(a.name))
-                               : String(a.name)
+            var label = String(a.name)
             if (a.size) label += "  (" + PbsBackupStore.humanBytes(a.size) + ")"
             list.push({ value: String(a.name), label: label })
           }

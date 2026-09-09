@@ -1002,6 +1002,7 @@ const isUserFiles = (name) => {
   if (String(name).indexOf("..") !== -1) return false;
   if (name.endsWith(".blob")) return false;
   if (name.endsWith(".pcat1")) return false;
+  if (/\.mpxar(\.didx)?$/.test(String(name))) return false;
   return /\.p?pxar(\.didx)?$/.test(String(name));
 };
 // Live PBS archives for one snapshot.
@@ -1348,46 +1349,47 @@ test_archive_filter_regex() {
   }
   tmp="$(mktemp -d)"
   local script="$tmp/regex-check.js"
-  # The QML source contains regex literals like /\.p?pxar(\.didx)?$/
-  # and /\.mpxar(\.didx)?$/. We grab those substrings directly and
-  # build real RegExp objects from them so the test exercises the
-  # exact same patterns the QML runtime sees.
+  # The QML source contains the pxar regex literal as
+  # /\.p?pxar(\.didx)?$/ (and may also contain /\.mpxar(\.didx)?$/
+  # as a reject clause). We grab the pxar substring directly and
+  # build a real RegExp object from it so the test exercises the
+  # exact same pattern the QML runtime sees.
   cat > "$script" <<'JS'
 const fs = require("fs");
 const src = fs.readFileSync("RestoreBrowser.qml", "utf8");
 
-// Index of the pxar regex literal start (`/\.p?pxar` or `/\.pxar`).
-// The literal in source is `\.p?pxar(\.didx)?$` after the fix, or
-// `\.pxar(\.didx)?$` before the fix — both start with `/\.p` or
-// `/\.p` (the source contains literal `\`, `.`, `p`, `x`...).
-const pxarIdx = src.indexOf("/\\.p") >= 0 ? src.indexOf("/\\.p") : src.indexOf("/\\.pxar");
-const mpxarIdx = src.indexOf("/\\.mpxar");
-
-if (pxarIdx < 0 || mpxarIdx < 0) {
-  console.log("pxar/mpxar regex literals not found in source");
+// Index of the pxar regex literal start. After the user-files-only
+// filter the literal is `\.p?pxar(\.didx)?$`.
+const pxarIdx = src.indexOf("/\\.p?pxar") >= 0
+  ? src.indexOf("/\\.p?pxar")
+  : src.indexOf("/\\.pxar");
+if (pxarIdx < 0) {
+  console.log("pxar regex literal not found in source");
   process.exit(2);
 }
-
-// Pull the substring between the two `/`s. The source has a real
-// backslash before each metachar, so we just take everything up to
-// the next `/`.
 const end1 = src.indexOf("/", pxarIdx + 1);
-const end2 = src.indexOf("/", mpxarIdx + 1);
 const pxarLiteral = src.substring(pxarIdx + 1, end1);
-const mpxarLiteral = src.substring(mpxarIdx + 1, end2);
+
+// Optional mpxar reject clause (also extracted if present).
+const mpxarIdx = src.indexOf("/\\.mpxar");
+let mpxarLiteral = null;
+if (mpxarIdx >= 0) {
+  const end2 = src.indexOf("/", mpxarIdx + 1);
+  mpxarLiteral = src.substring(mpxarIdx + 1, end2);
+}
 
 console.log("pxar literal: " + pxarLiteral);
-console.log("mpxar literal: " + mpxarLiteral);
+if (mpxarLiteral) console.log("mpxar literal: " + mpxarLiteral);
 
 // Construct RegExp objects directly from those substrings.
 const pxar = new RegExp(pxarLiteral);
-const mpxar = new RegExp(mpxarLiteral);
+const mpxar = mpxarLiteral ? new RegExp(mpxarLiteral) : null;
 
 const cases = [
   ["external-disk.pxar",          true,  "files"],
   ["external-disk.ppxar.didx",    true,  "files"],
-  ["external-disk.mpxar",         true,  "host"],
-  ["external-disk.mpxar.didx",    true,  "host"],
+  ["external-disk.mpxar",         false, ""],
+  ["external-disk.mpxar.didx",    false, ""],
   ["index.json.blob",             false, ""],
   ["catalog.pcat1",               false, ""],
   ["whatever.fidx",               false, ""],
@@ -1397,11 +1399,11 @@ const isMountable = (n) => {
   if (n.indexOf("..") !== -1) return false;
   if (n.endsWith(".blob")) return false;
   if (n.endsWith(".pcat1")) return false;
-  return pxar.test(n) || mpxar.test(n);
+  if (mpxar && mpxar.test(n)) return false;
+  return pxar.test(n);
 };
 const archiveKind = (n) => {
   if (pxar.test(n)) return "files";
-  if (mpxar.test(n)) return "host";
   return "";
 };
 
@@ -1421,7 +1423,7 @@ JS
   local out; out="$(node "$script" 2>&1)"; local code=$?
   rm -rf -- "$tmp"
   if [ "$code" = "0" ]; then
-    printf '  ok    archive filter accepts pxar/ppxar.didx/mpxar/mpxar.didx, rejects blob/pcat1\n'
+    printf '  ok    archive filter accepts pxar/ppxar.didx, drops mpxar/blob/pcat1\n'
   else
     printf '  FAIL  archive filter failed (code=%d): %s\n' "$code" "$out"
     TESTS_FAILED=$((TESTS_FAILED + 1))
