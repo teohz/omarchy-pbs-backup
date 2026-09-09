@@ -822,6 +822,47 @@ mount_path_for() {
   printf '%s/%s/%s' "$MOUNT_ROOT" "$GROUP_NAME" "$safe"
 }
 
+# Mount a PBS archive as a FUSE filesystem at the path the caller can
+# read. Returns 0 on success, 1 on failure. Shared between cmd_mount
+# (which prints status to the user) and cmd_ls (which auto-mounts on
+# first listing so the QML doesn't need a separate click).
+mount_snapshot() {
+  local snapshot_id="$1"
+  local archive="$2"
+  local mp; mp="$(mount_path_for "$snapshot_id")"
+  mkdir -p -m 700 -- "$MOUNT_ROOT/$GROUP_NAME"
+
+  if mountpoint -q -- "$mp" 2>/dev/null; then
+    return 0
+  fi
+  mkdir -p -- "$mp"
+  # PBS mounts FUSE; the process blocks until umount. We do not background it:
+  # the plugin keeps the mount alive for the lifetime of the panel and unmounts
+  # on close. Leaving it backgrounded orphans the mount when the user closes
+  # the panel.
+  pbs_run mount "$snapshot_id" "$archive" "$mp" &
+  local mount_pid=$!
+  # Wait briefly for the mount to come up; PBS writes a "starting" line first.
+  local waited=0
+  while [ "$waited" -lt 50 ]; do
+    if mountpoint -q -- "$mp" 2>/dev/null; then
+      return 0
+    fi
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  # Mount never came up. If the PBS process is still alive, kill it; if
+  # it died, harvest its exit status. Either way the caller gets 1.
+  if kill -0 "$mount_pid" 2>/dev/null; then
+    kill "$mount_pid" 2>/dev/null || true
+    wait "$mount_pid" 2>/dev/null || true
+  else
+    wait "$mount_pid" 2>/dev/null || true
+  fi
+  rmdir -- "$mp" 2>/dev/null
+  return 1
+}
+
 cmd_mount() {
   parse_options "$@"
   load_config
@@ -831,35 +872,9 @@ cmd_mount() {
   validate_archive_name "$OPT_ARCHIVE"
 
   local mp; mp="$(mount_path_for "$OPT_SNAPSHOT")"
-  mkdir -p -m 700 -- "$MOUNT_ROOT/$GROUP_NAME"
-
-  if mountpoint -q -- "$mp" 2>/dev/null; then
-    printf 'Already mounted at %s\n' "$mp"
+  if mount_snapshot "$OPT_SNAPSHOT" "$OPT_ARCHIVE"; then
+    printf 'Mounted %s (%s) at %s\n' "$OPT_SNAPSHOT" "$OPT_ARCHIVE" "$mp"
     return 0
-  fi
-  mkdir -p -- "$mp"
-  # PBS mounts FUSE; the process blocks until umount. We do not background it:
-  # the plugin keeps the mount alive for the lifetime of the panel and unmounts
-  # on close. Leaving it backgrounded orphans the mount when the user closes
-  # the panel.
-  pbs_run mount "$OPT_SNAPSHOT" "$OPT_ARCHIVE" "$mp" &
-  local mount_pid=$!
-  # Wait briefly for the mount to come up; PBS writes a "starting" line first.
-  local waited=0
-  while [ "$waited" -lt 50 ]; do
-    if mountpoint -q -- "$mp" 2>/dev/null; then
-      printf 'Mounted %s (%s) at %s\n' "$OPT_SNAPSHOT" "$OPT_ARCHIVE" "$mp"
-      return 0
-    fi
-    sleep 0.1
-    waited=$((waited + 1))
-  done
-  # Mount never came up. Check whether the PBS process is still alive; if it
-  # died with an error, we have it.
-  if ! kill -0 "$mount_pid" 2>/dev/null; then
-    wait "$mount_pid" 2>/dev/null
-    rmdir -- "$mp" 2>/dev/null
-    die "mount failed; proxmox-backup-client exited"
   fi
   die "mount did not appear within 5s; check PBS connectivity"
 }
@@ -902,8 +917,13 @@ cmd_ls() {
 
   local mp; mp="$(mount_path_for "$OPT_SNAPSHOT")"
   if ! mountpoint -q -- "$mp" 2>/dev/null; then
-    jq -nc --arg p "$path" '{ok:false, error:"snapshot is not mounted; open Restore Files once to mount", path:$p, entries:[]}'
-    return 0
+    # Auto-mount on first listing. The restore browser has no separate
+    # "mount this snapshot" click; the moment the user picks an archive
+    # we ensure the FUSE mount is up.
+    if ! mount_snapshot "$OPT_SNAPSHOT" "$OPT_ARCHIVE"; then
+      jq -nc --arg p "$path" '{ok:false, error:"could not mount snapshot; check PBS connectivity", path:$p, entries:[]}'
+      return 0
+    fi
   fi
 
   local safe; safe="$(printf '%s' "$path" | sed 's#/$##')"

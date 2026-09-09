@@ -894,6 +894,37 @@ test_stale_progress_seconds_at_least_30() {
   TESTS_RUN=$((TESTS_RUN + 1))
 }
 
+# R1 fix: cmd_ls requires the FUSE snapshot to be mounted, but no path
+# in the QML ever calls cmd_mount — the restore browser always failed
+# with "snapshot is not mounted". After the fix cmd_ls must auto-mount
+# (or call the same helper cmd_mount uses) when the mountpoint isn't
+# present.
+test_cmd_ls_auto_mounts() {
+  local fn
+  fn="$(awk '/^cmd_ls\(\)/,/^}/' "$SCRIPT")"
+  # Strip comments before grepping.
+  local body
+  body="$(printf '%s\n' "$fn" | sed 's|#.*||')"
+  # Body must include both a mount helper call AND the existing
+  # mountpoint check, otherwise cmd_ls is either not auto-mounting or
+  # removing the safety check entirely.
+  if printf '%s\n' "$body" | grep -q 'mountpoint -q'; then
+    : # mountpoint check still present, good
+  else
+    printf '  FAIL  cmd_ls lost its mountpoint safety check\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    TESTS_RUN=$((TESTS_RUN + 1))
+    return
+  fi
+  if printf '%s\n' "$body" | grep -qE 'mount_snapshot|mount_command|do_mount'; then
+    printf '  ok    cmd_ls auto-mounts via a shared mount helper\n'
+  else
+    printf '  FAIL  cmd_ls does not auto-mount (relying on a caller that does not exist)\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
 # Run all tests.
 main() {
   printf 'omarchy-pbs-backup tests\n'
@@ -939,6 +970,7 @@ main() {
   test_no_invisible_layout_probes
   test_cmd_restore_unique_dest
   test_stale_progress_seconds_at_least_30
+  test_cmd_ls_auto_mounts
   printf -- '------------------------\n'
   printf '%d checks run, %d failed\n' "$TESTS_RUN" "$TESTS_FAILED"
   [ "$TESTS_FAILED" = "0" ]
