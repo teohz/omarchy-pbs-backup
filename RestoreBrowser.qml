@@ -64,6 +64,10 @@ FocusScope {
   // mountable; the rest are PBS-internal bookkeeping the user should
   // never have to choose between. Filter them out at the source so the
   // dropdown, the auto-select, and the picker visibility all agree.
+  //
+  // PBS's chunk-index file is `<name>.ppxar.didx` (note the extra `p`),
+  // while the older direct archive name is `<name>.pxar`. Accept both,
+  // plus the analogous `<name>.mpxar(.didx)?` for host metadata.
   function isMountable(name) {
     if (!name) return false
     var n = String(name)
@@ -71,12 +75,12 @@ FocusScope {
     // Skip the snapshot manifest and the catalog file.
     if (n.endsWith(".blob")) return false
     if (n.endsWith(".pcat1")) return false
-    return /\.pxar(\.didx)?$/.test(n) || /\.mpxar(\.didx)?$/.test(n)
+    return /\.p?pxar(\.didx)?$/.test(n) || /\.mpxar(\.didx)?$/.test(n)
   }
 
   function archiveKind(name) {
     var n = String(name)
-    if (/\.pxar(\.didx)?$/.test(n)) return "files"
+    if (/\.p?pxar(\.didx)?$/.test(n)) return "files"
     if (/\.mpxar(\.didx)?$/.test(n)) return "host"
     return ""
   }

@@ -1141,6 +1141,101 @@ test_archive_path_validation() {
   rm -rf -- "$tmp"
 }
 
+# Issue 2: the archive filter regex must accept both PBS's chunk-index
+# names (`external-disk.ppxar.didx`, `external-disk.mpxar.didx`) and
+# older direct-archive names (`external-disk.pxar`, `…mpxar`), and
+# reject PBS bookkeeping (`index.json.blob`, `catalog.pcat1`). The
+# pre-fix regex required `\.pxar` which misses the leading `p` of
+# `ppxar.didx`, so the dropdown filtered everything out and the user
+# fell back to picking `archives[0]` raw — getting the manifest blob.
+test_archive_filter_regex() {
+  command -v node >/dev/null 2>&1 || {
+    printf '  SKIP  node not available; cannot verify regex behaviour\n'
+    return
+  }
+  tmp="$(mktemp -d)"
+  local script="$tmp/regex-check.js"
+  # The QML source contains regex literals like /\.p?pxar(\.didx)?$/
+  # and /\.mpxar(\.didx)?$/. We grab those substrings directly and
+  # build real RegExp objects from them so the test exercises the
+  # exact same patterns the QML runtime sees.
+  cat > "$script" <<'JS'
+const fs = require("fs");
+const src = fs.readFileSync("RestoreBrowser.qml", "utf8");
+
+// Index of the pxar regex literal start (`/\.p?pxar` or `/\.pxar`).
+// The literal in source is `\.p?pxar(\.didx)?$` after the fix, or
+// `\.pxar(\.didx)?$` before the fix — both start with `/\.p` or
+// `/\.p` (the source contains literal `\`, `.`, `p`, `x`...).
+const pxarIdx = src.indexOf("/\\.p") >= 0 ? src.indexOf("/\\.p") : src.indexOf("/\\.pxar");
+const mpxarIdx = src.indexOf("/\\.mpxar");
+
+if (pxarIdx < 0 || mpxarIdx < 0) {
+  console.log("pxar/mpxar regex literals not found in source");
+  process.exit(2);
+}
+
+// Pull the substring between the two `/`s. The source has a real
+// backslash before each metachar, so we just take everything up to
+// the next `/`.
+const end1 = src.indexOf("/", pxarIdx + 1);
+const end2 = src.indexOf("/", mpxarIdx + 1);
+const pxarLiteral = src.substring(pxarIdx + 1, end1);
+const mpxarLiteral = src.substring(mpxarIdx + 1, end2);
+
+console.log("pxar literal: " + pxarLiteral);
+console.log("mpxar literal: " + mpxarLiteral);
+
+// Construct RegExp objects directly from those substrings.
+const pxar = new RegExp(pxarLiteral);
+const mpxar = new RegExp(mpxarLiteral);
+
+const cases = [
+  ["external-disk.pxar",          true,  "files"],
+  ["external-disk.ppxar.didx",    true,  "files"],
+  ["external-disk.mpxar",         true,  "host"],
+  ["external-disk.mpxar.didx",    true,  "host"],
+  ["index.json.blob",             false, ""],
+  ["catalog.pcat1",               false, ""],
+  ["whatever.fidx",               false, ""],
+];
+const isMountable = (n) => {
+  if (!n) return false;
+  if (n.indexOf("..") !== -1) return false;
+  if (n.endsWith(".blob")) return false;
+  if (n.endsWith(".pcat1")) return false;
+  return pxar.test(n) || mpxar.test(n);
+};
+const archiveKind = (n) => {
+  if (pxar.test(n)) return "files";
+  if (mpxar.test(n)) return "host";
+  return "";
+};
+
+let fails = 0;
+for (const [name, wantMountable, wantKind] of cases) {
+  const m = isMountable(name), k = archiveKind(name);
+  if (m !== wantMountable || k !== wantKind) {
+    console.log("FAIL " + JSON.stringify(name) +
+                " mountable=" + m + " want " + wantMountable +
+                " kind=" + k + " want " + wantKind);
+    fails++;
+  }
+}
+if (fails > 0) process.exit(1);
+process.exit(0);
+JS
+  local out; out="$(node "$script" 2>&1)"; local code=$?
+  rm -rf -- "$tmp"
+  if [ "$code" = "0" ]; then
+    printf '  ok    archive filter accepts pxar/ppxar.didx/mpxar/mpxar.didx, rejects blob/pcat1\n'
+  else
+    printf '  FAIL  archive filter failed (code=%d): %s\n' "$code" "$out"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
 # Run all tests.
 main() {
   printf 'omarchy-pbs-backup tests\n'
@@ -1193,6 +1288,7 @@ main() {
   test_backup_all_iterates_and_dry_run
   test_backup_all_with_dest_errors
   test_archive_path_validation
+  test_archive_filter_regex
   printf -- '------------------------\n'
   printf '%d checks run, %d failed\n' "$TESTS_RUN" "$TESTS_FAILED"
   [ "$TESTS_FAILED" = "0" ]
