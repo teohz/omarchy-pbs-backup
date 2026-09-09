@@ -859,6 +859,22 @@ test_no_invisible_layout_probes() {
   TESTS_RUN=$((TESTS_RUN + 1))
 }
 
+# M13 fix: cmd_restore derived its destination directory from the
+# snapshot timestamp, so two restores of the same snapshot within the
+# same second collided on disk. Use mktemp -d so the directory name
+# is guaranteed unique.
+test_cmd_restore_unique_dest() {
+  local fn
+  fn="$(awk '/^cmd_restore\(\)/,/^}/' "$SCRIPT")"
+  if printf '%s\n' "$fn" | grep -q 'mktemp -d'; then
+    printf '  ok    cmd_restore uses mktemp -d for a unique destination\n'
+  else
+    printf '  FAIL  cmd_restore may collide on rapid re-runs\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
 # Run all tests.
 main() {
   printf 'omarchy-pbs-backup tests\n'
@@ -902,6 +918,7 @@ main() {
   test_groups_table_column_separators
   test_restore_header_uses_layout
   test_no_invisible_layout_probes
+  test_cmd_restore_unique_dest
   printf -- '------------------------\n'
   printf '%d checks run, %d failed\n' "$TESTS_RUN" "$TESTS_FAILED"
   [ "$TESTS_FAILED" = "0" ]

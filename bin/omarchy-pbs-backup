@@ -964,12 +964,16 @@ cmd_restore() {
   local home="${HOME}"
   local dest="$OPT_TARGET"
   if [ -z "$dest" ]; then
-    # Build a date-stamped directory under ~/Restored. We use the snapshot's
-    # UTC timestamp (the last segment of the snapshot id) to avoid collisions
-    # between two restores of the same snapshot.
+    # Build a date-stamped directory under ~/Restored. The snapshot's
+    # UTC timestamp is the human-readable prefix; mktemp -d appends a
+    # random suffix so two restores of the same snapshot within the same
+    # second don't collide on disk.
     local ts; ts="$(printf '%s' "$OPT_SNAPSHOT" | awk -F/ '{print $NF}' | tr -d 'Z:' | tr 'T' '_' | tr -dc '0-9_')"
     [ -n "$ts" ] || ts="$(date +%Y-%m-%d_%H%M%S)"
-    dest="$home/Restored/$ts/$(basename_safe "$OPT_PATH")"
+    mkdir -p -- "$home/Restored"
+    local dir; dir="$(mktemp -d "${home}/Restored/${ts}-XXXXXX")" ||
+      die "could not create restore directory under $home/Restored"
+    dest="$dir/$(basename_safe "$OPT_PATH")"
   fi
   mkdir -p -- "$dest" || die "could not create $dest"
 
