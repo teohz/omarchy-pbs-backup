@@ -549,6 +549,26 @@ test_load_archives_dispatches() {
   TESTS_RUN=$((TESTS_RUN + 1))
 }
 
+# M3 fix: confirmCancel left restoreTargetName / restoreTargetPath set,
+# so cancelling the confirm dialog and then opening it from a different
+# selection still showed the previous name. After the fix, cancel clears
+# both fields.
+test_confirm_cancel_clears_target() {
+  local fn
+  fn="$(awk '
+    /^  function confirmCancel\(/ { inside=1 }
+    inside { print }
+    inside && /^  }$/ { inside=0 }
+  ' RestoreBrowser.qml)"
+  if printf '%s\n' "$fn" | grep -qE 'restoreTarget(Name|Path) ?='; then
+    printf '  ok    confirmCancel clears restoreTarget* state\n'
+  else
+    printf '  FAIL  confirmCancel does not clear restoreTarget* state\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
 # Run all tests.
 main() {
   printf 'omarchy-pbs-backup tests\n'
@@ -580,6 +600,7 @@ main() {
   test_openlog_wired_in_panel
   test_openconfig_xdg_config_home
   test_load_archives_dispatches
+  test_confirm_cancel_clears_target
   printf -- '------------------------\n'
   printf '%d checks run, %d failed\n' "$TESTS_RUN" "$TESTS_FAILED"
   [ "$TESTS_FAILED" = "0" ]

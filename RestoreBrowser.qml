@@ -28,7 +28,14 @@ FocusScope {
   property string fontFamily: Style.font.family
 
   readonly property bool confirmOpen: restoreConfirm.opened
-  function confirmCancel() { restoreConfirm.opened = false }
+  function confirmCancel() {
+    // Clear the target fields so a fresh selection doesn't show the old
+    // name in the dialog. accept() leaves them in place because the
+    // restore Proc reads them after the dialog closes.
+    restoreTargetPath = ""
+    restoreTargetName = ""
+    restoreConfirm.opened = false
+  }
   function confirmAccept() {
     if (root.restoreTargetPath !== "")
       PbsBackupStore.restore(root.snapshotId, root.archiveName, root.restoreTargetPath)
