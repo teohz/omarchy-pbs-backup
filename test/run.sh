@@ -442,6 +442,37 @@ test_pbs_context_no_chmod_secret() {
   TESTS_RUN=$((TESTS_RUN + 1))
 }
 
+# M11 fix: systemd unit files are conventionally mode 644. The script-wide
+# `umask 077` would otherwise leave them at 600 (owner-only). write_unit
+# must explicitly chmod them after the rename.
+test_systemd_units_mode_644() {
+  local fn
+  fn="$(awk '/^write_unit\(\)/,/^}/' "$SCRIPT")"
+  if printf '%s\n' "$fn" | grep -qE 'chmod (0?644|644)'; then
+    printf '  ok    write_unit chmods systemd units to 644\n'
+  else
+    printf '  FAIL  write_unit does not chmod systemd units to 644\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+
+  # Behavioural: extract write_unit and the helpers it uses, run it in a
+  # throwaway dir under a strict umask (the script's own setting) so the
+  # test exercises the chmod-fix specifically.
+  local helpers
+  helpers="$(awk '/^readable_file\(\)/,/^}/' "$SCRIPT")"
+  helpers+=$'\n'
+  helpers+="$(awk '/^write_unit\(\)/,/^}/' "$SCRIPT")"
+  local tmp; tmp="$(mktemp -d)"
+  mkdir -p "$tmp/units"
+  local script
+  script="SYSTEMD_DIR='$tmp/units'; umask 077; $helpers; write_unit 'sample.service' '[Unit]\nDescription=test'"
+  bash -c "$script" >/dev/null 2>&1
+  local mode; mode="$(stat -c '%a' "$tmp/units/sample.service" 2>/dev/null || echo "missing")"
+  rm -rf -- "$tmp"
+  assert_eq "write_unit produces mode 644 under umask 077" "644" "$mode"
+}
+
 # Run all tests.
 main() {
   printf 'omarchy-pbs-backup tests\n'
@@ -468,6 +499,7 @@ main() {
   test_record_status_calls_snapshot_list_once
   test_cmd_groups_repo_naming
   test_pbs_context_no_chmod_secret
+  test_systemd_units_mode_644
   printf -- '------------------------\n'
   printf '%d checks run, %d failed\n' "$TESTS_RUN" "$TESTS_FAILED"
   [ "$TESTS_FAILED" = "0" ]

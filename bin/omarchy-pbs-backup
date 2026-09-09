@@ -1271,6 +1271,10 @@ write_unit() {
   fi
   printf '%s\n' "$content" > "$path.tmp.$$" && mv -f -- "$path.tmp.$$" "$path" ||
     die "could not write $path"
+  # The script-wide umask is 077 (private state), but unit files are not
+  # private data — systemd reads them as the user, and a 600 unit is
+  # surprising for anyone inspecting the dir.
+  chmod 644 -- "$path"
   if [ -n "$existing" ]; then printf '  ~ %s\n' "$filename"; else printf '  + %s\n' "$filename"; fi
 }
 
