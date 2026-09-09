@@ -358,6 +358,32 @@ test_verbose() {
   assert_eq "script has substance (200+ lines)" "0" "$?"
 }
 
+# H3 fix: groups_table must not compute snapshot_count twice. The bug was
+# two identical jq pipelines back-to-back (`size=` and `snaps=`), one of
+# which was dead code. The remaining computation should be unique.
+test_groups_table_no_duplicate_count() {
+  local fn
+  fn="$(awk '/^groups_table\(\)/,/^}/' "$SCRIPT")"
+  local count
+  count="$(printf '%s\n' "$fn" | grep -c 'snapshot_count // 0')"
+  if [ "$count" -gt 1 ]; then
+    printf '  FAIL  groups_table computes snapshot_count %d times (dead duplicate)\n' "$count"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  else
+    printf '  ok    groups_table computes snapshot_count once\n'
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+
+  # No assignment to a `size` local in groups_table: that var was dead.
+  if printf '%s\n' "$fn" | grep -qE '^[[:space:]]+size='; then
+    printf '  FAIL  groups_table still assigns to dead `size` local\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  else
+    printf '  ok    groups_table has no dead `size` assignment\n'
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
 # Run all tests.
 main() {
   printf 'omarchy-pbs-backup tests\n'
@@ -380,6 +406,7 @@ main() {
   test_basename_safe
   test_key_show_no_secret
   test_key_set_writes_secret
+  test_groups_table_no_duplicate_count
   printf -- '------------------------\n'
   printf '%d checks run, %d failed\n' "$TESTS_RUN" "$TESTS_FAILED"
   [ "$TESTS_FAILED" = "0" ]

@@ -645,7 +645,6 @@ groups_table() {
     printf '%-22s %-22s %-38s %-14s %s\n' "$name" "$label" "$repo" "$schedule" "$last"
   done < <(cfg '.groups[].name')
 
-  size="$(jq -r '[.groups[] | .snapshot_count // 0] | add // 0' <<<"$status" 2>/dev/null)"
   snaps="$(jq -r '[.groups[] | .snapshot_count // 0] | add // 0' <<<"$status" 2>/dev/null)"
   if [ "$(number_or "$snaps" 0)" -gt 0 ]; then
     printf '\n%s snapshots tracked\n' "$snaps"
