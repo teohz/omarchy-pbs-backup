@@ -344,19 +344,18 @@ group_label() {
 
 # What PBS sees: the --backup-id flag. Per-group `backup_id` field overrides;
 # empty / null falls back to the sanitized basename of the source path,
-# matching the existing pbs-adhoc-backup.sh convention so two tools do not
-# create two separate PBS groups for the same source.
+# What PBS sees: the --backup-id flag. Per-group `backup_id` field
+# overrides; empty / null falls back to the group's `name`. The PBS-safe
+# character set is already enforced by config_problem on `name`, so the
+# fallback needs only the same sanitiser.
 group_backup_id() {
-  local explicit source base
+  local explicit
   explicit="$(group '.backup_id // empty')"
   if [ -n "$explicit" ]; then
     printf '%s' "$(sanitize_for_pbs_id "$explicit")"
     return 0
   fi
-  source="$(group '.source // empty')"
-  [ -n "$source" ] || source="$HOME"
-  base="$(basename_safe "$source")"
-  printf '%s' "$(sanitize_for_pbs_id "$base")"
+  printf '%s' "$(sanitize_for_pbs_id "$GROUP_NAME")"
 }
 
 # PBS distinguishes --backup-id (an identifier, used with `backup`) from
@@ -404,7 +403,15 @@ pbs_context() {
     die "pbs.repository is not set in config.json"
 
   fingerprint="$(cfg '.pbs.fingerprint // empty')"
-  namespace="$(cfg '.namespace // empty')"
+
+  # Per-group namespace, falling back to the top-level. Two groups can
+  # now live under separate PBS namespaces; one group can override the
+  # top-level default without disturbing the others.
+  namespace=""
+  if [ -n "${GROUP_JSON:-}" ]; then
+    namespace="$(jq -r '.namespace // empty' <<<"$GROUP_JSON" 2>/dev/null)"
+  fi
+  [ -n "$namespace" ] || namespace="$(cfg '.namespace // empty')"
 
   # Only override env vars that aren't already set, so tests can pin values
   # via the environment without the script clobbering them.
@@ -1155,9 +1162,17 @@ record_status() {
 
   local snapshot_count=0
   local repo_size=0
+  local bid group ns
+  bid="$(group_backup_id)"
+  group="$(pbs_group "$bid")"
+  # Per-group namespace (or top-level fallback) — the PBS namespace this
+  # group's snapshots land under. Surfaced in status.json so a user
+  # can sanity-check which path the backups land on without having to
+  # log into PBS.
+  ns="$(jq -r '.namespace // empty' <<<"$GROUP_JSON" 2>/dev/null)"
+  [ -n "$ns" ] || ns="$(cfg '.namespace // empty')"
+
   if [ "$result" != "failed" ]; then
-    local bid; bid="$(group_backup_id)"
-    local group; group="$(pbs_group "$bid")"
     # PBS has no cheap "repo size" command on the client side; the per-group
     # size lives in snapshot list's `.size` field summed across snapshots.
     # One call, two numbers: the count and the size sum share the same
@@ -1175,6 +1190,8 @@ record_status() {
 
   jq \
     --arg name "$GROUP_NAME" \
+    --arg backup_id "$bid" \
+    --arg namespace "$ns" \
     --arg display "$(cfg '.pbs.repository // empty')" \
     --arg started "$started" \
     --arg finished "$finished" \
@@ -1187,6 +1204,8 @@ record_status() {
     '
     .version = 1
     | .groups[$name] = ((.groups[$name] // {}) + {
+        backup_id: $backup_id,
+        namespace: $namespace,
         repository_display: $display,
         last_run: {
           started_at: $started,

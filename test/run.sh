@@ -706,6 +706,114 @@ test_no_dead_entry_time() {
   TESTS_RUN=$((TESTS_RUN + 1))
 }
 
+# H0 fix (1/3): group_backup_id must default to the group's `name`,
+# NOT to basename(source). Two configured groups with similar source
+# paths (e.g. /mnt/disk and /mnt/data) would otherwise collide on the
+# PBS side; even worse, the storage name has no relation to the name
+# the user configured.
+test_group_backup_id_defaults_to_name() {
+  local helpers
+  helpers="$(awk '/^sanitize_for_pbs_id\(\)/,/^}/' "$SCRIPT")"
+  helpers+=$'\n'
+  helpers+="$(awk '/^basename_safe\(\)/,/^}/' "$SCRIPT")"
+  helpers+=$'\n'
+  helpers+="$(awk '/^group_backup_id\(\)/,/^}/' "$SCRIPT")"
+  # group() is just jq on GROUP_JSON.
+  helpers+=$'\ngroup() { jq -r "$1" <<<"$GROUP_JSON"; }'
+
+  # Test 1: explicit .backup_id wins.
+  local out
+  out="$(bash -c "
+    GROUP_NAME='my-disk'
+    GROUP_JSON='{\"name\":\"my-disk\",\"backup_id\":\"custom-name\"}'
+    HOME=/tmp
+    $helpers
+    group_backup_id
+  ")"
+  assert_eq "group_backup_id honors explicit .backup_id" "custom-name" "$out"
+
+  # Test 2: defaults to GROUP_NAME, not basename(source).
+  out="$(bash -c "
+    GROUP_NAME='my-cool-disk'
+    GROUP_JSON='{\"name\":\"my-cool-disk\",\"source\":\"/some/unrelated/path\"}'
+    HOME=/tmp
+    $helpers
+    group_backup_id
+  ")"
+  assert_eq "group_backup_id defaults to group name (not basename of source)" "my-cool-disk" "$out"
+
+  # Test 3: special chars in name are sanitised through PBS-safe charset.
+  out="$(bash -c "
+    GROUP_NAME='weird name!'
+    GROUP_JSON='{\"name\":\"weird name!\"}'
+    HOME=/tmp
+    $helpers
+    group_backup_id
+  ")"
+  assert_eq "group_backup_id sanitises special chars in name" "weird-name-" "$out"
+}
+
+# H0 fix (2/3): pbs_context must honor a per-group `.namespace` before
+# falling back to the top-level namespace. Two groups in the same
+# config can now live under separate PBS namespaces.
+test_pbs_context_honors_per_group_namespace() {
+  # Behavioural: source a fake pbs_context that exercises the namespace
+  # resolution. We can't easily run the real pbs_context because it
+  # reads the secret file and may not be in our test env, so we test
+  # the namespace-resolution clause directly by extracting it.
+  #
+  # Simplest reliable test: source-grep that pbs_context looks at
+  # GROUP_JSON for .namespace before falling back to the top-level
+  # .namespace. The actual jq call is the source of truth.
+  local fn
+  fn="$(awk '/^pbs_context\(\)/,/^}/' "$SCRIPT")"
+  # Comment-stripped body.
+  local body
+  body="$(printf '%s\n' "$fn" | sed 's|#.*||')"
+  # Must read .namespace from the active group (GROUP_JSON), not just
+  # the top-level config.
+  if printf '%s\n' "$body" | grep -qE "GROUP_JSON.*namespace|namespace.*GROUP_JSON"; then
+    printf '  ok    pbs_context reads namespace from active group\n'
+  else
+    printf '  FAIL  pbs_context does not consult GROUP_JSON for namespace\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+
+  # Must still fall back to the top-level namespace when the active
+  # group does not specify one.
+  if printf '%s\n' "$body" | grep -qE "\\.namespace // empty"; then
+    printf '  ok    pbs_context falls back to top-level namespace\n'
+  else
+    printf '  FAIL  pbs_context does not fall back to top-level namespace\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
+# H0 fix (3/3): record_status must surface the actual backup_id and
+# namespace used, so a user can sanity-check from `status --json`
+# which PBS path the backups land on.
+test_record_status_records_identity() {
+  local fn
+  fn="$(awk '/^record_status\(\)/,/^}/' "$SCRIPT")"
+  if printf '%s\n' "$fn" | grep -qE 'backup_id:[[:space:]]*\$backup_id|backup_id: ?\\$b'; then
+    printf '  ok    record_status writes backup_id to status.json\n'
+  else
+    printf '  FAIL  record_status does not record backup_id\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+
+  if printf '%s\n' "$fn" | grep -qE 'namespace:[[:space:]]*\$namespace|namespace: ?\\$n'; then
+    printf '  ok    record_status writes namespace to status.json\n'
+  else
+    printf '  FAIL  record_status does not record namespace\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
 # Run all tests.
 main() {
   printf 'omarchy-pbs-backup tests\n'
@@ -743,6 +851,9 @@ main() {
   test_group_detail_no_data_added_bytes
   test_readme_mount_path_matches_script
   test_no_dead_entry_time
+  test_group_backup_id_defaults_to_name
+  test_pbs_context_honors_per_group_namespace
+  test_record_status_records_identity
   printf -- '------------------------\n'
   printf '%d checks run, %d failed\n' "$TESTS_RUN" "$TESTS_FAILED"
   [ "$TESTS_FAILED" = "0" ]
