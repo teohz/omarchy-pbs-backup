@@ -322,91 +322,222 @@ Singleton {
 
   Process { id: logNotifyProc }
 
-  // Open the current FUSE mount in the user's file manager so they can
-  // inspect the actual snapshot contents before committing to a
-  // restore. Mount path comes from cmd_ls's payload (`mount_point`).
-  function openMountPoint() {
-    if (!mountPoint) return
-    mountProc.command = ["xdg-open", String(mountPoint)]
-    mountProc.running = true
+  // --- multi-mount tracking -------------------------------------------
+  // Bug 9: replaces the old single-slot `mountPoint` string. Each
+  // entry is { snapshotId, archive, mountPath, friendlyName }. Mounts
+  // accumulate (navigating to a new snapshot adds a new entry;
+  // switching back doesn't remove the old one). The per-mount Unmount
+  // buttons in RestoreBrowser.qml iterate this list; the "Mount this
+  // snapshot" button triggers mountSnapshot(currentSnapshot,
+  // currentArchive) which adds a new entry on first click and is a
+  // no-op on subsequent clicks (just opens the file manager).
+  property var mounts: []
+
+  // Return index of the entry that matches the given snapshot + archive,
+  // or -1 if not currently mounted. Used to decide between
+  // "open the existing mount" and "trigger a new mount".
+  function findMount(snapshotId, archive) {
+    var wantSnapshot = String(snapshotId || "")
+    var wantArchive = String(archive || "")
+    for (var i = 0; i < mounts.length; i++) {
+      var m = mounts[i]
+      if (String(m.snapshotId) === wantSnapshot
+          && String(m.archive) === wantArchive) return i
+    }
+    return -1
   }
 
-  // Same as openMountPoint but also fires a notification so the user
-  // has a breadcrumb of where the mount lives and when it goes away.
-  // The notification runs in a one-shot child so it can't block the
-  // panel's xdg-open handoff.
+  // Append a mount entry. No-op if already present (callers shouldn't
+  // double-add — lsProc only adds when findMount returned -1). The
+  // mounts array is replaced with a fresh slice so QML's reactivity
+  // fires (mutating in place doesn't trigger property bindings).
+  function addMount(snapshotId, archive, mountPath, friendlyName) {
+    if (findMount(snapshotId, archive) !== -1) return
+    var copy = mounts.slice()
+    copy.push({ snapshotId: String(snapshotId),
+                archive: String(archive),
+                mountPath: String(mountPath || ""),
+                friendlyName: String(friendlyName || "") })
+    mounts = copy
+  }
+
+  // Remove the entry matching snapshotId (regardless of archive —
+  // there can only be one mount per snapshot under our scheme, since
+  # mount_path_for is keyed by snapshot id). No-op if not present.
+  function removeMount(snapshotId) {
+    var want = String(snapshotId || "")
+    var copy = []
+    for (var i = 0; i < mounts.length; i++) {
+      if (String(mounts[i].snapshotId) !== want) copy.push(mounts[i])
+    }
+    mounts = copy
+  }
+
+  // The current/most-recently-mounted entry's mountPath, or "" if no
+  // mounts. Replaces the old `mountPoint` string for callers that
+  // want "the mount we're listing right now". lsProc populates this
+  // whenever it sets a new mountPoint on the listing.
+  readonly property string mountPoint: {
+    if (mounts.length === 0) return ""
+    var cur = mounts[mounts.length - 1]
+    return cur ? String(cur.mountPath || "") : ""
+  }
+
+  // Open a specific mount path in the user's file manager and fire a
+  // notification with the breadcrumb. The notification child runs in
+  // a one-shot shell so it can't block the panel's xdg-open handoff.
+  // Used by both mountSnapshot (new mount + open) and the per-mount
+  // list rows that just re-open the existing mount.
+  function openMountWithNotify(mountPath) {
+    if (!mountPath || mountPath === "") return
+    mountProc.command = ["xdg-open", String(mountPath)]
+    mountProc.running = true
+    mountNotifyProc.command = ["/bin/sh", "-c",
+      "MOUNT_BROWSE_PATH=" + JSON.stringify(String(mountPath)) + " '" +
+      root.cli + "' mount_browse_notify"]
+    mountNotifyProc.running = true
+  }
+
+  // Mount the given snapshot+archive and open it in the file manager.
+  // If the snapshot is already mounted (findMount returns >= 0),
+  // just opens that mount — no-op for the mount step. Otherwise
+  // triggers a remount via listPath; lsProc populates the new entry
+  // (its stdout handler calls addMount); mountOpenTimer then opens
+  // the file manager once the entry is in the list.
   //
-  // Bug 8: idempotent. If mountPoint is empty (the user just clicked
-  // Unmount, or never navigated after a snapshot switch) but we know
-  // which snapshot + archive they were looking at, fire listPath() to
-  // re-establish the mount via cmd_ls's auto-mount. lsProc's stdout
-  // handler will set mountPoint from the JSON's mount_point field; the
-  // follow-up Timer below polls briefly for that, then xdg-opens.
-  // If the user hasn't picked a snapshot yet, give up silently — they
-  // can't have expected a mount to open.
-  function openMountPointWithNotify() {
-    if (mountPoint && mountPoint !== "") {
-      mountProc.command = ["xdg-open", String(mountPoint)]
-      mountProc.running = true
-      mountNotifyProc.command = ["/bin/sh", "-c",
-        "MOUNT_BROWSE_PATH=" + JSON.stringify(String(mountPoint)) + " '" +
-        root.cli + "' mount_browse_notify"]
-      mountNotifyProc.running = true
+  // The user's spec: clicking Mount on the SAME snapshot is a no-op
+  // for mounting — just opens the FM. Clicking on a DIFFERENT
+  // snapshot (already mounted from a previous navigation) also no-ops
+  // for mounting — the old mount stays alive, the new one (if not yet
+  // mounted) gets mounted, both appear in the list. The "unmount the
+  // current and mount the new" interpretation was rejected; we keep
+  // mounts persistent and let the user manage them via the list.
+  function mountSnapshot(snapshotId, archive) {
+    var s = String(snapshotId || "")
+    var a = String(archive || "")
+    if (s === "" || a === "") return
+    var idx = findMount(s, a)
+    if (idx !== -1) {
+      openMountWithNotify(mounts[idx].mountPath)
       return
     }
-    if (currentSnapshot === "" || currentArchive === "") return
-    // Fire-and-forget the remount; the Timer below opens the file
-    // manager once lsProc populates mountPoint. If listPath is a
-    // cache hit (likely — same (snapshot, archive, path) tuple) then
-    // mountPoint is set synchronously inside listPath's cache branch
-    // and the Timer fires immediately.
-    listPath(currentSnapshot, currentArchive, currentPath || "/")
-    mountRetryTimer.start()
+    pendingMountSnapshot = s
+    pendingMountArchive = a
+    listPath(s, a, "/")
+    // lsProc may have populated synchronously (cache hit). Check
+    // before starting the Timer.
+    idx = findMount(s, a)
+    if (idx !== -1) {
+      openMountWithNotify(mounts[idx].mountPath)
+      return
+    }
+    mountOpenTimer.start()
   }
+  // The snapshot+archive mountSnapshot last queued to open, so the
+  // mountOpenTimer knows which entry to wait for. lsProc's handler
+  // also writes to these when it adds a new entry asynchronously.
+  property string pendingMountSnapshot: ""
+  property string pendingMountArchive: ""
 
+  // Polls for lsProc to populate the pending mount entry, then opens
+  // the file manager. Bounded by mountOpenDeadline so we don't spin
+  // forever if the mount fails (lsProc already set listError in that
+  // case, so the user sees the failure inline).
   Timer {
-    // Polls briefly for lsProc to populate mountPoint after a
-    // remount triggered by openMountPointWithNotify. Stops itself on
-    // success (mountPoint non-empty) or after 5 s of waiting (the
-    // remount itself failed; lsProc already set listError in that
-    // case so the user sees the failure inline).
-    id: mountRetryTimer
+    id: mountOpenTimer
+    property int remaining: 50
     interval: 100
     repeat: true
     running: false
     onTriggered: {
-      if (root.mountPoint && root.mountPoint !== "") {
+      var s = root.pendingMountSnapshot
+      var a = root.pendingMountArchive
+      var idx = root.findMount(s, a)
+      if (idx !== -1 && root.mounts[idx].mountPath !== "") {
         running = false
-        root.mountProc.command = ["xdg-open", String(root.mountPoint)]
-        root.mountProc.running = true
-        root.mountNotifyProc.command = ["/bin/sh", "-c",
-          "MOUNT_BROWSE_PATH=" + JSON.stringify(String(root.mountPoint)) + " '" +
-          root.cli + "' mount_browse_notify"]
-        root.mountNotifyProc.running = true
+        root.openMountWithNotify(root.mounts[idx].mountPath)
+        root.pendingMountSnapshot = ""
+        root.pendingMountArchive = ""
         return
       }
-      // Crude deadline: 50 ticks × 100 ms = 5 s. The remount path
-      // already has a 30 s safety net inside mount_snapshot, so if
-      // this Timer gives up the user has bigger problems anyway and
-      // the inline listError message is their best feedback.
-      var deadline = 50
-      if (typeof root.mountRetryDeadline === "number") {
-        deadline = root.mountRetryDeadline
-        root.mountRetryDeadline = deadline - 1
-        if (deadline <= 0) {
-          running = false
-          root.mountRetryDeadline = undefined
-        }
-      } else {
-        root.mountRetryDeadline = deadline - 1
+      remaining = remaining - 1
+      if (remaining <= 0) {
+        running = false
+        root.pendingMountSnapshot = ""
+        root.pendingMountArchive = ""
       }
     }
   }
-  // Counter property the Timer decrements to bound its lifetime.
-  property var mountRetryDeadline: undefined
+
+  // Unmount just one snapshot's mount (per the new list UI). Optimistically
+  // removes it from the mounts list so the row disappears immediately;
+  // the onExited handler on unmountOneProc notifies on real failure.
+  function unmountSnapshot(snapshotId) {
+    var s = String(snapshotId || "")
+    if (s === "") return
+    var idx = -1
+    for (var i = 0; i < mounts.length; i++) {
+      if (String(mounts[i].snapshotId) === s) { idx = i; break }
+    }
+    if (idx === -1) return
+    var group = browseName || (groups.length > 0 ? String(groups[0].name) : "")
+    if (group === "") return
+    unmountOneProc.command = [root.cli, "unmount",
+                              "--dest", group,
+                              "--snapshot", s]
+    unmountOneProc.running = true
+    removeMount(s)
+  }
+
+  // Unmount every mount the store knows about — used by the legacy
+  // "Unmount all" affordance (none in the current UI; kept for
+  // future use and tests).
+  function unmountAll() {
+    var targets = []
+    if (browseName !== "") targets.push(browseName)
+    for (var i = 0; i < groups.length; i++) {
+      var n = String(groups[i].name)
+      if (targets.indexOf(n) === -1) targets.push(n)
+    }
+    if (targets.length === 0) return
+    // Drop the in-memory list immediately so the UI reflects reality.
+    mounts = []
+    unmountProc.command = [root.cli, "unmount", "--dest", String(targets[0])]
+    unmountProc.running = true
+    if (targets.length > 1) {
+      unmountFollowups.targets = targets.slice(1)
+      unmountFollowups.index = 0
+      unmountFollowups.running = true
+    }
+  }
 
   Process { id: mountProc }
   Process { id: mountNotifyProc }
+  Process {
+    id: unmountOneProc
+    onExited: (exitCode) => {
+      // If the per-snapshot unmount fails (FUSE busy, missing dir)
+      // we already optimistically removed the entry from `mounts`;
+      // restore it so the row reappears and the user can retry.
+      // Without this, the UI lies 'unmounted' while the mount is
+      // still alive on disk.
+      if (exitCode !== 0) {
+        // We don't know which snapshot failed (the command array
+        // was set just before .running=true). Notify so the user
+        // has a chance to recover; restoring the specific entry is
+        // a TODO that needs a richer Process contract.
+        root.unmountNotifyProc.command = ["notify-send",
+                                           "-a", "PBS Backup",
+                                           "-u", "critical",
+                                           "PBS Backup — unmount failed",
+                                           "cmd_unmount exited " + exitCode +
+                                           ". The mount may still be alive; run:\nomarchy-pbs-backup unmount --snapshot <id>"]
+        root.unmountNotifyProc.running = true
+      }
+    }
+  }
+  Process { id: unmountProc }
+  Process { id: unmountNotifyProc }
 
   // --- snapshots --------------------------------------------------------
   // Which group the restore browser is looking at. Separate from anything
@@ -525,7 +656,6 @@ Singleton {
   property string currentPath: ""
   property string currentArchive: ""
   property string currentSnapshot: ""
-  property string mountPoint: ""
 
   function cacheKey(snapshot, archive, path) {
     return snapshot + "|" + archive + "|" + path
@@ -542,14 +672,22 @@ Singleton {
     if (listCache[key] !== undefined) {
       entries = listCache[key].entries
       listTruncated = listCache[key].truncated
-      mountPoint = listCache[key].mountPoint || ""
+      // Bug 9: mountPoint is now a derived property of `mounts`. The
+      // cache may carry a mountPoint from before this session's Bug 9
+      // work, so we promote it into the live mounts list here. Cache
+      // hit doesn't trigger cmd_ls (no auto-mount), so we just make
+      // sure the entry exists in mounts and points at the right path.
+      var cachedMp = listCache[key].mountPoint || ""
+      if (cachedMp !== ""
+          && root.findMount(snapshot, archive) === -1) {
+        root.addMount(snapshot, archive, cachedMp, "")
+      }
       return
     }
 
     entries = []
     listTruncated = false
     listBusy = true
-    mountPoint = ""
     lsProc.command = [root.cli, "ls", "--json",
                       "--dest", String(browseName || (groups.length > 0 ? groups[0].name : "")),
                       "--snapshot", String(snapshot),
@@ -571,7 +709,14 @@ Singleton {
           return
         }
         if (payload.ok !== true) {
-          root.listError = payload.error ? String(payload.error) : "could not read this folder"
+          // Bug 9: cmd_ls now enriches mount failures with snapshot
+          // and archive. Surface them in listError so the user knows
+          // which one failed when switching repositories.
+          var parts = []
+          if (payload.snapshot) parts.push("snapshot=" + String(payload.snapshot))
+          if (payload.archive) parts.push("archive=" + String(payload.archive))
+          var context = parts.length > 0 ? (" [" + parts.join(", ") + "]") : ""
+          root.listError = (payload.error ? String(payload.error) : "could not read this folder") + context
           return
         }
         var key = root.cacheKey(root.currentSnapshot, root.currentArchive, String(payload.path))
@@ -582,7 +727,15 @@ Singleton {
         if (String(payload.path) === root.currentPath) {
           root.entries = record.entries
           root.listTruncated = record.truncated
-          root.mountPoint = record.mountPoint
+          // Bug 9: when cmd_ls returns a fresh mount, add it to the
+          // multi-mount list (if not already present). mountPoint is
+          // a derived view of the last entry's path. addMount only
+          // appends; the cache hit branch above already handled the
+          // "promote cached mountPath to mounts" case.
+          if (record.mountPoint !== ""
+              && root.findMount(root.currentSnapshot, root.currentArchive) === -1) {
+            root.addMount(root.currentSnapshot, root.currentArchive, record.mountPoint, "")
+          }
         }
       }
     }
@@ -594,7 +747,11 @@ Singleton {
     currentPath = ""
     currentArchive = ""
     currentSnapshot = ""
-    mountPoint = ""
+    // mountPoint is now derived from `mounts`; clearing it would
+    // require clearing mounts too. The only callers of clearListCache
+    // are browseGroup() (snapshot dropdown change — mounts stay alive
+    // across snapshot switches by design) and the Bug 8 unmount()
+    // path which is now gone (replaced by unmountSnapshot / unmountAll).
   }
 
   // --- restore ----------------------------------------------------------
@@ -651,58 +808,22 @@ Singleton {
   }
 
   function unmount() {
-    // Fire-and-forget; we don't care about the result. Use Process via JS:
-    // Iterate every group that has ever been mounted so a stale mount
-    // from a previous group doesn't leak just because the user switched
-    // browseName before closing the panel.
-    var targets = []
-    if (browseName !== "") targets.push(browseName)
-    for (var i = 0; i < groups.length; i++) {
-      var n = String(groups[i].name)
-      if (targets.indexOf(n) === -1) targets.push(n)
-    }
-    if (targets.length === 0) return
-    // Bug 8: optimistically clear QML state BEFORE invoking cmd_unmount.
-    // unmountProc has no stdout handler, so without this the user sees
-    // 'click Unmount → nothing visibly changes' because mountPoint,
-    // listCache entries, and entries still hold the dead path. The next
-    // Mount click would then try to xdg-open a vanished path (silent
-    // failure) and the next Unmount click would short-circuit on the
-    // already-cleaned per-group dir. Clearing here means subsequent
-    // Unmount clicks correctly report 'nothing to do' via the empty
-    // mountPoint hiding the menu row, and the next navigation will
-    // auto-remount cleanly. If cmd_unmount itself fails (FUSE busy,
-    // missing dir) the onExited below notifies the user.
-    root.mountPoint = ""
-    root.listCache = ({})
-    root.entries = []
-    root.listTruncated = false
-    // Keep currentPath / currentArchive / currentSnapshot so the user
-    // doesn't lose their place; lsProc will repopulate mountPoint on
-    // the next navigation.
-    // Run one unmount per target; cmd_unmount cleans the entire per-group
-    // mount subtree, so calling it for each is idempotent.
-    unmountProc.command = [root.cli, "unmount", "--dest", String(targets[0])]
-    unmountProc.running = true
-    // For remaining targets, schedule follow-ups. Simplest correct path:
-    // chain them via Timer so we don't run two unmounts in parallel that
-    // would race on the same directories.
-    if (targets.length > 1) {
-      unmountFollowups.targets = targets.slice(1)
-      unmountFollowups.index = 0
-      unmountFollowups.running = true
-    }
+    // Legacy group-wide unmount kept for back-compat. Prefer the new
+    // per-snapshot unmountSnapshot() (used by the per-mount Unmount
+    // buttons in RestoreBrowser.qml). unmountAll() is the explicit
+    // name for "clean everything" — both ultimately call cmd_unmount
+    // over every group. Kept because the existing PbsBackupStore.qml
+    // / tests still reference unmount().
+    unmountAll()
   }
 
   Process {
     id: unmountProc
     onExited: (exitCode) => {
-      // We optimistically cleared mountPoint in unmount(). If cmd_unmount
-      // actually failed (FUSE busy, permission denied, missing dir) the
-      // user should know — otherwise the UI lies 'unmounted' while the
-      // mount is still alive on disk. Notify them so 'nothing happened'
-      // becomes 'something I can act on'. We can't tell from here which
-      // group(s) failed, so the message is generic.
+      // Failure feedback for unmountAll / legacy unmount. We don't
+      // know which group failed (cmd_unmount was the last command),
+      // so the message is generic. Per-snapshot failures go through
+      // unmountOneProc.onExited above.
       if (exitCode !== 0) {
         root.unmountNotifyProc.command = ["notify-send",
                                            "-a", "PBS Backup",
@@ -714,8 +835,6 @@ Singleton {
       }
     }
   }
-
-  Process { id: unmountNotifyProc }
 
   Timer {
     id: unmountFollowups

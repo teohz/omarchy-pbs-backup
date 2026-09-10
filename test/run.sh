@@ -1465,36 +1465,43 @@ test_logproc_has_on_exited_feedback() {
 }
 
 test_unmount_clears_mountpoint_optimistically() {
-  # Bug 8: unmount() must clear mountPoint BEFORE invoking cmd_unmount.
-  # unmountProc has no stdout handler, so without the optimistic clear
-  # the user sees 'click Unmount → nothing visibly changes' because
-  # mountPoint still holds the dead path. The next Mount click would
-  # try to xdg-open a vanished path, and the next Unmount would
-  # short-circuit on the already-cleaned per-group dir. Catches
-  # re-introduction of the silent-Unmount anti-pattern.
+  # Bug 9 replaces Bug 8's mountPoint string with a mounts array; the
+  # 'optimistic clear' invariant now lives on the array. unmount() must
+  # clear mounts (or call unmountAll() which does) so the per-mount
+  # Unmount rows disappear immediately on click. Without this the user
+  # sees 'click Unmount → nothing visibly changes' because the row
+  # stays in the list. Catches re-introduction of the silent-Unmount
+  # anti-pattern.
   local body
   body="$(awk '/^  function unmount\(/,/^  }/' PbsBackupStore.qml)"
-  if printf '%s' "$body" | grep -q 'mountPoint = ""'; then
-    printf '  ok    unmount clears mountPoint optimistically (Bug 8 guard)\n'
+  local unmountall_body
+  unmountall_body="$(awk '/^  function unmountAll\(/,/^  }/' PbsBackupStore.qml)"
+  if printf '%s' "$body" | grep -qE 'mounts = \[\]|unmountAll\(\)' \
+     || printf '%s' "$unmountall_body" | grep -qE 'mounts = \[\]'; then
+    printf '  ok    unmount clears mounts optimistically (Bug 8/9 guard)\n'
   else
-    printf '  FAIL  unmount no longer clears mountPoint (Bug 8 regression)\n'
+    printf '  FAIL  unmount no longer clears mounts (Bug 8/9 regression)\n'
     TESTS_FAILED=$((TESTS_FAILED + 1))
   fi
   TESTS_RUN=$((TESTS_RUN + 1))
 }
 
 test_unmount_clears_listcache() {
-  # Bug 8: listCache entries each carry a mountPoint reference; if we
-  # don't invalidate the cache on unmount, navigating back to a cached
-  # (snapshot, archive, path) pulls a stale mountPoint out and Mount
-  # & Browse will silently fail. Clearing listCache forces a fresh
-  # cmd_ls on the next navigation, which auto-mounts.
-  local body
-  body="$(awk '/^  function unmount\(/,/^  }/' PbsBackupStore.qml)"
-  if printf '%s' "$body" | grep -q 'listCache = ({})'; then
-    printf '  ok    unmount invalidates listCache (Bug 8 guard)\n'
+  # Bug 9: listCache survives unmountAll by design — entries are still
+  # valid PBS data; only the mountPath field references a now-dead
+  # path. listPath's cache-hit branch (PbsBackupStore.qml) now promotes
+  # any cached mountPoint into the live mounts array, so navigating
+  # back re-mounts cleanly without re-listing. This test is therefore
+  # a regression guard against the old design coming back: if someone
+  # re-introduces listCache = ({}) inside unmountAll(), the next
+  # navigation will be a fresh cmd_ls call (slow) instead of a cache
+  # hit (fast). Pin the absence.
+  local unmountall_body
+  unmountall_body="$(awk '/^  function unmountAll\(/,/^  }/' PbsBackupStore.qml)"
+  if ! printf '%s' "$unmountall_body" | grep -q 'listCache'; then
+    printf '  ok    unmountAll preserves listCache (Bug 9 design)\n'
   else
-    printf '  FAIL  unmount no longer clears listCache (Bug 8 regression)\n'
+    printf '  FAIL  unmountAll should not touch listCache (Bug 9 design)\n'
     TESTS_FAILED=$((TESTS_FAILED + 1))
   fi
   TESTS_RUN=$((TESTS_RUN + 1))
@@ -1537,23 +1544,18 @@ test_unmountproc_has_on_exited() {
 }
 
 test_mount_remounts_when_path_empty() {
-  # Bug 8: openMountPointWithNotify() must handle the empty/stale
-  # mountPoint case by kicking off a listPath() remount, then opening
-  # the file manager once lsProc populates mountPoint. Without this,
-  # the first Mount click after Unmount does nothing (the early
-  # `if (!mountPoint) return` short-circuits), which is what made
-  # the user think "Mount doesn't work either" after Unmount.
-  # The current pattern checks `mountPoint && mountPoint !== ""`
-  # (or equivalent) for the non-empty case, then falls through to
-  # listPath() when currentSnapshot+currentArchive are set.
+  # Bug 9: openMountPointWithNotify() was replaced by mountSnapshot()
+  # which checks findMount(); if the snapshot isn't mounted yet, it
+  # calls listPath() (which auto-mounts via cmd_ls) and waits for
+  # lsProc to populate the entry. Catches re-introduction of the
+  # 'Mount does nothing because mountPoint is empty' anti-pattern.
   local body
-  body="$(awk '/^  function openMountPointWithNotify\(/,/^  }/' PbsBackupStore.qml)"
-  if printf '%s' "$body" | grep -q 'listPath(currentSnapshot' \
-     && printf '%s' "$body" | grep -qE 'mountPoint.*!== *""' \
-     && printf '%s' "$body" | grep -q 'mountRetryTimer'; then
-    printf '  ok    openMountPointWithNotify auto-remounts when mountPoint empty (Bug 8 guard)\n'
+  body="$(awk '/^  function mountSnapshot\(/,/^  }/' PbsBackupStore.qml)"
+  if printf '%s' "$body" | grep -q 'listPath(' \
+     && printf '%s' "$body" | grep -q 'findMount'; then
+    printf '  ok    mountSnapshot auto-remounts via listPath when not mounted (Bug 9 guard)\n'
   else
-    printf '  FAIL  openMountPointWithNotify remount path regressed (Bug 8)\n'
+    printf '  FAIL  mountSnapshot remount path regressed (Bug 9)\n'
     TESTS_FAILED=$((TESTS_FAILED + 1))
   fi
   TESTS_RUN=$((TESTS_RUN + 1))
