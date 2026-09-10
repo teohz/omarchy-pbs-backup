@@ -3,6 +3,12 @@ config.json
 .secret
 
 # Working notes — local-only, never pushed (see ISSUES.md)
+# These four files are session-handover docs: CONTEXT.md (project
+# background), PLAN.md (current batch's plan), TASKS.md (next-actionable
+# steps with exact diffs), ISSUES.md (triage notebook).
+CONTEXT.md
+PLAN.md
+TASKS.md
 ISSUES.md
 
 # State directory layout (created at runtime by the CLI).
