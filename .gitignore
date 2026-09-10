@@ -11,6 +11,9 @@ PLAN.md
 TASKS.md
 ISSUES.md
 
+# Backlog — local-only deferred-ideas notebook.
+BACKLOG.md
+
 # State directory layout (created at runtime by the CLI).
 state/
 
