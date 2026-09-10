@@ -335,15 +335,75 @@ Singleton {
   // has a breadcrumb of where the mount lives and when it goes away.
   // The notification runs in a one-shot child so it can't block the
   // panel's xdg-open handoff.
+  //
+  // Bug 8: idempotent. If mountPoint is empty (the user just clicked
+  // Unmount, or never navigated after a snapshot switch) but we know
+  // which snapshot + archive they were looking at, fire listPath() to
+  // re-establish the mount via cmd_ls's auto-mount. lsProc's stdout
+  // handler will set mountPoint from the JSON's mount_point field; the
+  // follow-up Timer below polls briefly for that, then xdg-opens.
+  // If the user hasn't picked a snapshot yet, give up silently — they
+  // can't have expected a mount to open.
   function openMountPointWithNotify() {
-    if (!mountPoint) return
-    mountProc.command = ["xdg-open", String(mountPoint)]
-    mountProc.running = true
-    mountNotifyProc.command = ["/bin/sh", "-c",
-      "MOUNT_BROWSE_PATH=" + JSON.stringify(String(mountPoint)) + " '" +
-      root.cli + "' mount_browse_notify"]
-    mountNotifyProc.running = true
+    if (mountPoint && mountPoint !== "") {
+      mountProc.command = ["xdg-open", String(mountPoint)]
+      mountProc.running = true
+      mountNotifyProc.command = ["/bin/sh", "-c",
+        "MOUNT_BROWSE_PATH=" + JSON.stringify(String(mountPoint)) + " '" +
+        root.cli + "' mount_browse_notify"]
+      mountNotifyProc.running = true
+      return
+    }
+    if (currentSnapshot === "" || currentArchive === "") return
+    // Fire-and-forget the remount; the Timer below opens the file
+    // manager once lsProc populates mountPoint. If listPath is a
+    // cache hit (likely — same (snapshot, archive, path) tuple) then
+    // mountPoint is set synchronously inside listPath's cache branch
+    // and the Timer fires immediately.
+    listPath(currentSnapshot, currentArchive, currentPath || "/")
+    mountRetryTimer.start()
   }
+
+  Timer {
+    // Polls briefly for lsProc to populate mountPoint after a
+    // remount triggered by openMountPointWithNotify. Stops itself on
+    // success (mountPoint non-empty) or after 5 s of waiting (the
+    // remount itself failed; lsProc already set listError in that
+    // case so the user sees the failure inline).
+    id: mountRetryTimer
+    interval: 100
+    repeat: true
+    running: false
+    onTriggered: {
+      if (root.mountPoint && root.mountPoint !== "") {
+        running = false
+        root.mountProc.command = ["xdg-open", String(root.mountPoint)]
+        root.mountProc.running = true
+        root.mountNotifyProc.command = ["/bin/sh", "-c",
+          "MOUNT_BROWSE_PATH=" + JSON.stringify(String(root.mountPoint)) + " '" +
+          root.cli + "' mount_browse_notify"]
+        root.mountNotifyProc.running = true
+        return
+      }
+      // Crude deadline: 50 ticks × 100 ms = 5 s. The remount path
+      // already has a 30 s safety net inside mount_snapshot, so if
+      // this Timer gives up the user has bigger problems anyway and
+      // the inline listError message is their best feedback.
+      var deadline = 50
+      if (typeof root.mountRetryDeadline === "number") {
+        deadline = root.mountRetryDeadline
+        root.mountRetryDeadline = deadline - 1
+        if (deadline <= 0) {
+          running = false
+          root.mountRetryDeadline = undefined
+        }
+      } else {
+        root.mountRetryDeadline = deadline - 1
+      }
+    }
+  }
+  // Counter property the Timer decrements to bound its lifetime.
+  property var mountRetryDeadline: undefined
 
   Process { id: mountProc }
   Process { id: mountNotifyProc }
@@ -602,6 +662,24 @@ Singleton {
       if (targets.indexOf(n) === -1) targets.push(n)
     }
     if (targets.length === 0) return
+    // Bug 8: optimistically clear QML state BEFORE invoking cmd_unmount.
+    // unmountProc has no stdout handler, so without this the user sees
+    // 'click Unmount → nothing visibly changes' because mountPoint,
+    // listCache entries, and entries still hold the dead path. The next
+    // Mount click would then try to xdg-open a vanished path (silent
+    // failure) and the next Unmount click would short-circuit on the
+    // already-cleaned per-group dir. Clearing here means subsequent
+    // Unmount clicks correctly report 'nothing to do' via the empty
+    // mountPoint hiding the menu row, and the next navigation will
+    // auto-remount cleanly. If cmd_unmount itself fails (FUSE busy,
+    // missing dir) the onExited below notifies the user.
+    root.mountPoint = ""
+    root.listCache = ({})
+    root.entries = []
+    root.listTruncated = false
+    // Keep currentPath / currentArchive / currentSnapshot so the user
+    // doesn't lose their place; lsProc will repopulate mountPoint on
+    // the next navigation.
     // Run one unmount per target; cmd_unmount cleans the entire per-group
     // mount subtree, so calling it for each is idempotent.
     unmountProc.command = [root.cli, "unmount", "--dest", String(targets[0])]
@@ -616,7 +694,29 @@ Singleton {
     }
   }
 
-  Process { id: unmountProc }
+  Process {
+    id: unmountProc
+    onExited: (exitCode) => {
+      // We optimistically cleared mountPoint in unmount(). If cmd_unmount
+      // actually failed (FUSE busy, permission denied, missing dir) the
+      // user should know — otherwise the UI lies 'unmounted' while the
+      // mount is still alive on disk. Notify them so 'nothing happened'
+      // becomes 'something I can act on'. We can't tell from here which
+      // group(s) failed, so the message is generic.
+      if (exitCode !== 0) {
+        root.unmountNotifyProc.command = ["notify-send",
+                                           "-a", "PBS Backup",
+                                           "-u", "critical",
+                                           "PBS Backup — unmount failed",
+                                           "cmd_unmount exited " + exitCode +
+                                           ". The mount may still be alive; try Unmount again, or run:\nomarchy-pbs-backup unmount"]
+        root.unmountNotifyProc.running = true
+      }
+    }
+  }
+
+  Process { id: unmountNotifyProc }
+
   Timer {
     id: unmountFollowups
     property var targets: []
@@ -624,7 +724,15 @@ Singleton {
     interval: 200
     repeat: false
     onTriggered: {
-      if (index >= targets.length) return
+      // Bug 8: only re-arm the timer when there's actual work. The
+      // previous version unconditionally set `running = true`, which
+      // meant a 200 ms idle timer kept firing forever once the queue
+      // drained — wasteful, and could starve lower-priority timers in
+      // a tight Quickshell event loop.
+      if (index >= targets.length) {
+        running = false
+        return
+      }
       var t = targets[index]
       index = index + 1
       unmountProc.command = [root.cli, "unmount", "--dest", String(t)]

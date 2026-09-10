@@ -1463,6 +1463,101 @@ test_logproc_has_on_exited_feedback() {
   fi
   TESTS_RUN=$((TESTS_RUN + 1))
 }
+
+test_unmount_clears_mountpoint_optimistically() {
+  # Bug 8: unmount() must clear mountPoint BEFORE invoking cmd_unmount.
+  # unmountProc has no stdout handler, so without the optimistic clear
+  # the user sees 'click Unmount → nothing visibly changes' because
+  # mountPoint still holds the dead path. The next Mount click would
+  # try to xdg-open a vanished path, and the next Unmount would
+  # short-circuit on the already-cleaned per-group dir. Catches
+  # re-introduction of the silent-Unmount anti-pattern.
+  local body
+  body="$(awk '/^  function unmount\(/,/^  }/' PbsBackupStore.qml)"
+  if printf '%s' "$body" | grep -q 'mountPoint = ""'; then
+    printf '  ok    unmount clears mountPoint optimistically (Bug 8 guard)\n'
+  else
+    printf '  FAIL  unmount no longer clears mountPoint (Bug 8 regression)\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
+test_unmount_clears_listcache() {
+  # Bug 8: listCache entries each carry a mountPoint reference; if we
+  # don't invalidate the cache on unmount, navigating back to a cached
+  # (snapshot, archive, path) pulls a stale mountPoint out and Mount
+  # & Browse will silently fail. Clearing listCache forces a fresh
+  # cmd_ls on the next navigation, which auto-mounts.
+  local body
+  body="$(awk '/^  function unmount\(/,/^  }/' PbsBackupStore.qml)"
+  if printf '%s' "$body" | grep -q 'listCache = ({})'; then
+    printf '  ok    unmount invalidates listCache (Bug 8 guard)\n'
+  else
+    printf '  FAIL  unmount no longer clears listCache (Bug 8 regression)\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
+test_unmountfollowups_stops_when_idle() {
+  # Bug 8: unmountFollowups Timer used to set running = true
+  # unconditionally inside onTriggered, which meant a 200 ms
+  # repeat:false timer kept firing forever once the queue drained.
+  # The fix: only re-arm the timer when there's actual work. This
+  # test asserts the timer body sets running = false (or returns
+  # without restart) when index >= targets.length.
+  local body
+  body="$(awk '/id: unmountFollowups/,/^  }/' PbsBackupStore.qml)"
+  if printf '%s' "$body" | grep -qE 'running = false|targets\.length'; then
+    printf '  ok    unmountFollowups stops when idle (Bug 8 guard)\n'
+  else
+    printf '  FAIL  unmountFollowups idle polling regressed (Bug 8)\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
+test_unmountproc_has_on_exited() {
+  # Bug 8: unmountProc must have an onExited handler that surfaces
+  # cmd_unmount failures (FUSE busy, missing dir, permission denied).
+  # Without it the optimistic clear in unmount() makes the UI lie
+  # 'unmounted' while the mount is still alive on disk, and the user
+  # has no idea. The notify-send failure feedback is the safety net.
+  local body
+  body="$(awk '/id: unmountProc/,/^  }/' PbsBackupStore.qml)"
+  if printf '%s' "$body" | grep -q 'onExited' \
+     && printf '%s' "$body" | grep -q 'notify-send'; then
+    printf '  ok    unmountProc has onExited + notify-send feedback (Bug 8 guard)\n'
+  else
+    printf '  FAIL  unmountProc onExited feedback regressed (Bug 8)\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
+test_mount_remounts_when_path_empty() {
+  # Bug 8: openMountPointWithNotify() must handle the empty/stale
+  # mountPoint case by kicking off a listPath() remount, then opening
+  # the file manager once lsProc populates mountPoint. Without this,
+  # the first Mount click after Unmount does nothing (the early
+  # `if (!mountPoint) return` short-circuits), which is what made
+  # the user think "Mount doesn't work either" after Unmount.
+  # The current pattern checks `mountPoint && mountPoint !== ""`
+  # (or equivalent) for the non-empty case, then falls through to
+  # listPath() when currentSnapshot+currentArchive are set.
+  local body
+  body="$(awk '/^  function openMountPointWithNotify\(/,/^  }/' PbsBackupStore.qml)"
+  if printf '%s' "$body" | grep -q 'listPath(currentSnapshot' \
+     && printf '%s' "$body" | grep -qE 'mountPoint.*!== *""' \
+     && printf '%s' "$body" | grep -q 'mountRetryTimer'; then
+    printf '  ok    openMountPointWithNotify auto-remounts when mountPoint empty (Bug 8 guard)\n'
+  else
+    printf '  FAIL  openMountPointWithNotify remount path regressed (Bug 8)\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
 test_restore_file_via_cp() {
   setup_isolated_home
   mkdir -p -- "$XDG_CONFIG_HOME/omarchy-pbs-backup"
@@ -1887,6 +1982,11 @@ main() {
   test_status_payload_carries_finished_at
   test_logproc_uses_omarchy_launch_editor_with_xdg_open_fallback
   test_logproc_has_on_exited_feedback
+  test_unmount_clears_mountpoint_optimistically
+  test_unmount_clears_listcache
+  test_unmountfollowups_stops_when_idle
+  test_unmountproc_has_on_exited
+  test_mount_remounts_when_path_empty
   test_readme_mount_path_matches_script
   test_no_dead_entry_time
   test_group_backup_id_defaults_to_name
