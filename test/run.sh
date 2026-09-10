@@ -1263,6 +1263,26 @@ test_no_self_dot_in_qml() {
   fi
   TESTS_RUN=$((TESTS_RUN + 1))
 }
+
+test_restore_qml_passes_copy_source() {
+  # Regression for Bug 5: Bug 1 (4f774bd) shipped half-fixed. The bash
+  # CLI accepts --copy-source and the cp fast-path is in place, but
+  # PbsBackupStore.qml's restore() never passed the flag. Every
+  # restore fell through to the PBS extract-whole-archive fallback.
+  # This guard asserts that the QML's restore() function builds the
+  # command with --copy-source when a mount is alive. Defensive —
+  # catches re-introduction of the missing wiring.
+  local body
+  body="$(awk '/^  function restore\(/,/^  }/' PbsBackupStore.qml)"
+  if printf '%s' "$body" | grep -q -- '--copy-source' \
+     && printf '%s' "$body" | grep -q 'mountPoint'; then
+    printf '  ok    PbsBackupStore.restore passes --copy-source (Bug 5 guard)\n'
+  else
+    printf '  FAIL  PbsBackupStore.restore missing --copy-source (Bug 5 regression)\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
 test_restore_file_via_cp() {
   setup_isolated_home
   mkdir -p -- "$XDG_CONFIG_HOME/omarchy-pbs-backup"
@@ -1680,6 +1700,7 @@ main() {
   test_unmount_menu_row_present
   test_mount_browse_sends_terise_notify
   test_no_self_dot_in_qml
+  test_restore_qml_passes_copy_source
   test_readme_mount_path_matches_script
   test_no_dead_entry_time
   test_group_backup_id_defaults_to_name

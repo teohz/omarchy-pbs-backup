@@ -471,11 +471,23 @@ Singleton {
     restoreError = ""
     restoreTarget = ""
     var destGroup = (browseName !== "") ? browseName : groups[0].name
-    restoreProc.command = [root.cli, "restore",
-                           "--dest", String(destGroup),
-                           "--snapshot", String(snapshot),
-                           "--archive", String(archive),
-                           "--path", String(path)]
+    // Pass the active FUSE mount as --copy-source so cmd_restore's cp
+    // fast-path runs (Bug 1, commit 4f774bd). Without this flag every
+    // restore falls back to `proxmox-backup-client restore ...` which
+    // always extracts the entire .ppxar.didx chunk — picking a single
+    // file would pull down the whole archive. The bash helper refuses
+    // to use the flag if the path isn't a real directory, so it's safe
+    // to pass mountPoint even if the user invoked restore from a state
+    // where the mount had been cleaned up: the script falls back to PBS.
+    var args = [root.cli, "restore",
+                "--dest", String(destGroup),
+                "--snapshot", String(snapshot),
+                "--archive", String(archive),
+                "--path", String(path)]
+    if (mountPoint !== "") {
+      args.push("--copy-source", String(mountPoint))
+    }
+    restoreProc.command = args
     restoreProc.running = true
   }
 
