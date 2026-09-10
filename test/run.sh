@@ -1244,6 +1244,25 @@ test_mount_browse_sends_terise_notify() {
   fi
   TESTS_RUN=$((TESTS_RUN + 1))
 }
+
+test_no_self_dot_in_qml() {
+  # Regression for Bug 6 (typo `self.cli` in openMountPointWithNotify):
+  # `self` is not defined in Quickshell QML, so any reference to it
+  # throws a TypeError at the call site and silently aborts the
+  # function. The correct pattern is `root.<id>`. Grep every .qml
+  # file in the plugin root for the literal `self.` and fail if
+  # found. Defensive: catches a re-introduction of the same bug,
+  # not the original.
+  local hits
+  hits="$(grep -nE '\bself\.' *.qml 2>/dev/null || true)"
+  if [ -z "$hits" ]; then
+    printf '  ok    no `self.` references in QML (Bug 6 guard)\n'
+  else
+    printf '  FAIL  `self.` found in QML:\n%s\n' "$hits"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
 test_restore_file_via_cp() {
   setup_isolated_home
   mkdir -p -- "$XDG_CONFIG_HOME/omarchy-pbs-backup"
@@ -1660,6 +1679,7 @@ main() {
   test_mount_browse_button_renamed
   test_unmount_menu_row_present
   test_mount_browse_sends_terise_notify
+  test_no_self_dot_in_qml
   test_readme_mount_path_matches_script
   test_no_dead_entry_time
   test_group_backup_id_defaults_to_name

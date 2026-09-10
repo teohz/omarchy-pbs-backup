@@ -260,7 +260,7 @@ Singleton {
     mountProc.running = true
     mountNotifyProc.command = ["/bin/sh", "-c",
       "MOUNT_BROWSE_PATH=" + JSON.stringify(String(mountPoint)) + " '" +
-      self.cli + "' mount_browse_notify"]
+      root.cli + "' mount_browse_notify"]
     mountNotifyProc.running = true
   }
 
