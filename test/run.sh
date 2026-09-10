@@ -1212,17 +1212,19 @@ test_mount_browse_button_renamed() {
 }
 
 test_unmount_menu_row_present() {
-  # Look for a MenuRow whose label is exactly "Unmount" inside the
-  # RestoreBrowser.qml file (more precise than a free-text grep).
-  # Tolerant of any indentation (RestoreBrowser.qml uses 4-space, but
-  # the MenuRow component itself uses 2-space).
+  # Bug 9: per-mount Unmount rows live inside a Repeater delegate;
+  # the label is "Unmount " + friendlyName (concatenation), not the
+  # literal "Unmount" string the old single-slot test asserted.
+  # Accept any MenuRow (top-level OR `delegate: MenuRow`) whose label
+  # contains a string starting with "Unmount". Tolerant of any
+  # indentation.
   if awk '
-    /^[[:space:]]+MenuRow \{/ { capture = 1; block = ""; next }
+    /^[[:space:]]+(MenuRow|delegate:[[:space:]]*MenuRow) \{/ { capture = 1; block = ""; next }
     capture { block = block $0 ORS }
-    capture && /^[[:space:]]+\}/ { if (block ~ /label: *"Unmount"/) { found = 1 }; capture = 0 }
+    capture && /^[[:space:]]+\}/ { if (block ~ /label: *("Unmount|"Unmount \\u)/) { found = 1 }; capture = 0 }
     END { exit (found ? 0 : 1) }
   ' RestoreBrowser.qml; then
-    printf '  ok    Unmount MenuRow present\n'
+    printf '  ok    Unmount MenuRow present (Bug 9 per-mount list)\n'
   else
     printf '  FAIL  no Unmount MenuRow in RestoreBrowser.qml\n'
     TESTS_FAILED=$((TESTS_FAILED + 1))

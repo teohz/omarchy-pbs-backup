@@ -533,54 +533,43 @@ FocusScope {
       font.pixelSize: Style.font.caption
     }
 
-    // Mount hint: lets a power user open the FUSE mount in their file
-    // manager and use cp / find / grep from a terminal without going through
-    // the restore dialog.
-    RowLayout {
+    // Mount controls: an explicit "Mount this snapshot" button plus
+    // a per-mount list of "Unmount <name>" rows. Bug 9 replaced the
+    // old single-slot "Mount & Browse Directory…" link + single
+    // Unmount button with this multi-mount UI. Multiple mounts can
+    // coexist; navigating to a new snapshot adds a new entry rather
+    // than replacing the active one. Each entry's Unmount calls
+    // PbsBackupStore.unmountSnapshot(snapshotId) which fires
+    // `cmd_unmount --snapshot <id>` for that specific mount only.
+    MenuRow {
       width: parent.width
-      visible: PbsBackupStore.mountPoint !== ""
-      spacing: Style.space(8)
-
-      Text {
-        Layout.fillWidth: true
-        text: "Mounted at " + PbsBackupStore.mountPoint
-        textFormat: Text.PlainText
-        elide: Text.ElideLeft
-        color: root.dim
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.caption
-      }
-
-      // Open the mount in the user's file manager so they can verify
-      // the snapshot contents (and mtimes, etc.) before committing to
-      // a restore — the plugin's listing shows names and sizes, but
-      // the file manager shows everything.
-      Text {
-        Layout.alignment: Qt.AlignVCenter
-        text: "Mount & Browse Directory\u2026"
-        textFormat: Text.PlainText
-        color: root.accent
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.caption
-        MouseArea {
-          anchors.fill: parent
-          cursorShape: Qt.PointingHandCursor
-          onClicked: {
-            PbsBackupStore.openMountPointWithNotify()
-            root.takeFocus()
-          }
-        }
+      visible: PbsBackupStore.snapshots.length > 0 && root.snapshotId !== ""
+      label: "Mount this snapshot"
+      foreground: root.foreground
+      fontFamily: root.fontFamily
+      onClicked: {
+        PbsBackupStore.mountSnapshot(root.snapshotId, root.archiveName)
+        root.takeFocus()
       }
     }
 
-    // --- restore ---------------------------------------------------------
-    MenuRow {
-      width: parent.width
-      visible: PbsBackupStore.mountPoint !== "" && !PbsBackupStore.restoreBusy
-      label: "Unmount"
-      foreground: root.foreground
-      fontFamily: root.fontFamily
-      onClicked: PbsBackupStore.unmount()
+    // List of currently-mounted snapshots, each with its own Unmount
+    // button. friendlyName is built by lsProc as "<group> · <snap-
+    // basename>" so each row is self-explanatory. Repeater regenerates
+    // rows when mounts array changes (mount/unmount).
+    Repeater {
+      model: PbsBackupStore.mounts
+      delegate: MenuRow {
+        width: parent.width
+        required property var modelData
+        visible: !PbsBackupStore.restoreBusy
+        label: "Unmount " + (modelData.friendlyName !== ""
+                             ? modelData.friendlyName
+                             : String(modelData.snapshotId))
+        foreground: root.foreground
+        fontFamily: root.fontFamily
+        onClicked: PbsBackupStore.unmountSnapshot(String(modelData.snapshotId))
+      }
     }
 
     PanelSeparator { width: parent.width }
