@@ -861,6 +861,15 @@ mount_snapshot() {
   if mountpoint -q -- "$mp" 2>/dev/null; then
     return 0
   fi
+  # Bug 9: kill any stuck proxmox-backup-client mount processes for this
+  # group before spawning a new one. Bug 4 deliberately stopped killing
+  # FUSE on timeout, which is correct behaviour (don't race the user) but
+  # leaves orphans that accumulate across failed mounts. When the user
+  # then switches snapshots, kernel FUSE handle limits can be hit and the
+  # new mount errors with the opaque 'could not mount snapshot; check
+  # PBS connectivity'. pkill here only targets mount procs (not all
+  # proxmox-backup-client activity) and only for THIS group.
+  pkill -f "proxmox-backup-client mount .*${GROUP_NAME}" 2>/dev/null || true
   mkdir -p -- "$mp"
   # PBS mounts FUSE; the process blocks until umount. We do not background it:
   # the plugin keeps the mount alive for the lifetime of the panel and unmounts
@@ -921,6 +930,22 @@ cmd_unmount() {
   load_config
   select_destination "$OPT_DEST"
 
+  # Bug 9: --snapshot <id> unmounts just the one mount for that
+  # snapshot id; resolves the same way cmd_ls / mount_snapshot do.
+  # Falls through to the group-wide cleanup if --snapshot isn't set,
+  # preserving the old behaviour for callers that still use it.
+  if [ -n "${OPT_SNAPSHOT:-}" ]; then
+    validate_snapshot_id "$OPT_SNAPSHOT"
+    local mp_one; mp_one="$(mount_path_for "$OPT_SNAPSHOT")"
+    if mountpoint -q -- "$mp_one" 2>/dev/null; then
+      fusermount3 -u -- "$mp_one" 2>/dev/null \
+        || fusermount -u -- "$mp_one" 2>/dev/null \
+        || umount -l -- "$mp_one" 2>/dev/null
+    fi
+    rmdir -- "$mp_one" 2>/dev/null
+    return 0
+  fi
+
   local dir="$MOUNT_ROOT/$GROUP_NAME"
   [ -d "$dir" ] || return 0
 
@@ -958,7 +983,13 @@ cmd_ls() {
     # "mount this snapshot" click; the moment the user picks an archive
     # we ensure the FUSE mount is up.
     if ! mount_snapshot "$OPT_SNAPSHOT" "$OPT_ARCHIVE"; then
-      jq -nc --arg p "$path" '{ok:false, error:"could not mount snapshot; check PBS connectivity", path:$p, entries:[]}'
+      # Bug 9: enrich the error to identify which snapshot failed so
+      # the listing doesn't just say 'could not connect' when the user
+      # is switching between repositories.
+      jq -nc --arg p "$path" \
+              --arg s "$OPT_SNAPSHOT" \
+              --arg a "$OPT_ARCHIVE" \
+        '{ok:false, error:"could not mount snapshot; check PBS connectivity", snapshot:$s, archive:$a, path:$p, entries:[]}'
       return 0
     fi
   fi
