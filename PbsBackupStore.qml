@@ -95,6 +95,17 @@ Singleton {
     }
   }
 
+  // Track each group's last_run.finished_at from the previous poll.
+  // applyStatus uses this to detect that a backup just finished for
+  // the group the restore browser is currently looking at, and
+  // refetch the snapshot list. Without this, a backup that completes
+  // while the panel is open shows the OLD snapshot list until the
+  // user manually switches group or closes the panel — Bug 3 / Bug 5.
+  // Reset to {} when the user changes browseName (see browseGroup);
+  // otherwise stale entries for the previous group could trigger a
+  // spurious refetch.
+  property var prevFinishedAt: ({})
+
   function applyStatus(text) {
     var payload
     try {
@@ -109,8 +120,35 @@ Singleton {
     root.unitsInstalled = payload.units_installed === true
     root.configInvalid = payload.invalid === true
     root.configError = payload.error ? String(payload.error) : ""
+    // Detect: did the active browse group's finished_at move forward?
+    // We compare BEFORE assigning root.groups so the previous values
+    // are still in scope.
+    var prev = root.prevFinishedAt || {}
+    var oldFinished = (root.browseName !== "" && prev[root.browseName])
+      ? String(prev[root.browseName])
+      : ""
     root.groups = payload.groups || []
     root.loaded = true
+    // Rebuild prevFinishedAt from the new payload. Only set when
+    // finished_at is non-empty — guards against transient missing
+    // fields on a half-written status.json.
+    var next = ({})
+    for (var i = 0; i < root.groups.length; i++) {
+      var g = root.groups[i]
+      if (g && g.last_run && g.last_run.finished_at)
+        next[String(g.name)] = String(g.last_run.finished_at)
+    }
+    root.prevFinishedAt = next
+    // If the active browse group's finished_at changed, refetch the
+    // snapshot list. We only refetch when we already had a list
+    // loaded — first poll shouldn't race a user-driven loadSnapshots().
+    if (root.browseName !== ""
+        && root.snapshotsLoaded
+        && oldFinished !== ""
+        && next[root.browseName]
+        && next[root.browseName] !== oldFinished) {
+      root.loadSnapshots()
+    }
   }
 
   Timer {

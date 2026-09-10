@@ -1367,6 +1367,64 @@ test_mount_snapshot_timeout_window() {
   fi
   TESTS_RUN=$((TESTS_RUN + 1))
 }
+
+test_apply_status_refetches_snapshots_on_finished_at_change() {
+  # Source-grep guard for Bug 3 / Bug 5: applyStatus must refetch
+  # the snapshot list when the active browseName's last_run.finished_at
+  # moves forward in a new status.json payload. The check is gated
+  # on snapshotsLoaded (first poll doesn't race a user loadSnapshots)
+  # and on the OLD finished_at being non-empty (prevents spurious
+  # triggers during the very first poll).
+  local body
+  body="$(awk '/^  function applyStatus\(/,/^  }/' PbsBackupStore.qml)"
+  if printf '%s' "$body" | grep -q 'prevFinishedAt' \
+     && printf '%s' "$body" | grep -q 'finished_at' \
+     && printf '%s' "$body" | grep -q 'loadSnapshots' \
+     && printf '%s' "$body" | grep -q 'snapshotsLoaded'; then
+    printf '  ok    applyStatus refetches snapshots on finished_at change (Bug 3 guard)\n'
+  else
+    printf '  FAIL  applyStatus auto-refresh wiring regressed (Bug 3 / Bug 5)\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
+test_status_payload_carries_finished_at() {
+  # Behavioural half of Bug 3 / Bug 5: the bash cmd_status payload
+  # must include each group's last_run.finished_at so the QML has
+  # something to compare. Without this field the auto-refresh in
+  # PbsBackupStore.qml's applyStatus is unreachable. cmd_status
+  # requires a valid config to return groups; we feed it the
+  # standard valid fixture.
+  setup_isolated_home
+  mkdir -p -- "$XDG_CONFIG_HOME/omarchy-pbs-backup"
+  cp "$FIXTURES/config-valid.json" "$XDG_CONFIG_HOME/omarchy-pbs-backup/config.json"
+  mkdir -p -- "$XDG_STATE_HOME/omarchy-pbs-backup"
+  cat > "$XDG_STATE_HOME/omarchy-pbs-backup/status.json" <<'JSON'
+{
+  "version": 1,
+  "groups": {
+    "external-drive": {
+      "last_run": {
+        "finished_at": "2026-09-10T12:34:56Z",
+        "result": "ok"
+      },
+      "snapshot_count": 1
+    }
+  }
+}
+JSON
+  local out
+  out="$("$SCRIPT" status --json 2>&1)"
+  if printf '%s' "$out" | grep -q '"finished_at"'; then
+    printf '  ok    cmd_status payload carries last_run.finished_at\n'
+  else
+    printf '  FAIL  cmd_status payload missing finished_at:\n%s\n' "$out"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  rm -rf -- "$tmp"
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
 test_restore_file_via_cp() {
   setup_isolated_home
   mkdir -p -- "$XDG_CONFIG_HOME/omarchy-pbs-backup"
@@ -1787,6 +1845,8 @@ main() {
   test_restore_qml_passes_copy_source
   test_mount_snapshot_no_kill_on_timeout
   test_mount_snapshot_timeout_window
+  test_apply_status_refetches_snapshots_on_finished_at_change
+  test_status_payload_carries_finished_at
   test_readme_mount_path_matches_script
   test_no_dead_entry_time
   test_group_backup_id_defaults_to_name
