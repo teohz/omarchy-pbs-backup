@@ -273,11 +273,54 @@ Singleton {
       }
     }
     if (!best) return
-    logProc.command = ["xdg-open", String(best)]
+    logFilePath = String(best)
+    logProcFallbackTries = 0
+    // Prefer omarchy-launch-editor: it's the canonical Omarchy
+    // handler and opens the log in the user's terminal editor,
+    // which is exactly what a .log file wants. xdg-open frequently
+    // has no .log MIME handler (Nautilus owns inode/directory and
+    // covers most of the desktop on Omarchy), which is what made
+    // this menu row silently do nothing for the user.
+    // Same rationale as openConfig() above — mirrors that pattern.
+    logProc.command = ["omarchy-launch-editor", logFilePath]
     logProc.running = true
   }
 
-  Process { id: logProc }
+  // Track which opener has been tried. omarchy-launch-editor first
+  // (canonical, opens in terminal), xdg-open as a fallback when
+  // omarchy-launch-editor is missing or errors out. Reset to 0 on
+  // every fresh openLog() so the user gets a deterministic
+  // omarchy-launch-editor-first experience each time.
+  property int logProcFallbackTries: 0
+  property string logFilePath: ""
+
+  Process {
+    id: logProc
+    onExited: (exitCode) => {
+      if (exitCode === 0 || root.logFilePath === "") return
+      if (root.logProcFallbackTries === 0) {
+        // omarchy-launch-editor failed (most commonly: not installed).
+        // Try xdg-open once before giving up.
+        root.logProcFallbackTries = 1
+        root.logProc.command = ["xdg-open", root.logFilePath]
+        root.logProc.running = true
+      } else {
+        // Both attempts failed. Tell the user instead of silently
+        // doing nothing — Bug 7. Without this feedback, "click
+        // menu row → nothing happens" is indistinguishable from
+        // "the menu row never wired up".
+        root.logNotifyProc.command = ["notify-send",
+                                      "-a", "PBS Backup",
+                                      "-u", "critical",
+                                      "PBS Backup — could not open log",
+                                      "Tried omarchy-launch-editor and xdg-open on:\n" +
+                                      root.logFilePath + "\nInstall omarchy-launch-editor or set a default .log handler."]
+        root.logNotifyProc.running = true
+      }
+    }
+  }
+
+  Process { id: logNotifyProc }
 
   // Open the current FUSE mount in the user's file manager so they can
   // inspect the actual snapshot contents before committing to a

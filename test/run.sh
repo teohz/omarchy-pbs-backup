@@ -1425,6 +1425,44 @@ JSON
   rm -rf -- "$tmp"
   TESTS_RUN=$((TESTS_RUN + 1))
 }
+
+test_logproc_uses_omarchy_launch_editor_with_xdg_open_fallback() {
+  # Source-grep guard for Bug 7 (Show Last Log does nothing):
+  # openLog() must try omarchy-launch-editor first, fall back to
+  # xdg-open on failure, and notify-send the user if both fail.
+  # The original xdg-open-only implementation silently exited with
+  # "no application registered" on .log files (Nautilus owned
+  # inode/directory), so the menu row looked broken.
+  local body
+  body="$(awk '/^  function openLog\(/,/^  }/' PbsBackupStore.qml)"
+  if printf '%s' "$body" | grep -q 'omarchy-launch-editor' \
+     && printf '%s' "$body" | grep -q 'xdg-open'; then
+    printf '  ok    openLog tries omarchy-launch-editor then xdg-open (Bug 7 guard)\n'
+  else
+    printf '  FAIL  openLog opener chain regressed (Bug 7)\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
+test_logproc_has_on_exited_feedback() {
+  # Source-grep guard for Bug 7: logProc must have an onExited
+  # handler that does something when exitCode !== 0 — otherwise
+  # 'click → silent failure' is indistinguishable from 'click →
+  # nothing wired up'. The fix is in onExited: increment
+  # logProcFallbackTries, retry with xdg-open, then notify-send.
+  local body
+  body="$(awk '/id: logProc/,/^  }/' PbsBackupStore.qml)"
+  if printf '%s' "$body" | grep -q 'onExited' \
+     && printf '%s' "$body" | grep -q 'logProcFallbackTries' \
+     && printf '%s' "$body" | grep -q 'notify-send'; then
+    printf '  ok    logProc has onExited feedback with notify-send (Bug 7 guard)\n'
+  else
+    printf '  FAIL  logProc onExited/notify-send feedback regressed (Bug 7)\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
 test_restore_file_via_cp() {
   setup_isolated_home
   mkdir -p -- "$XDG_CONFIG_HOME/omarchy-pbs-backup"
@@ -1847,6 +1885,8 @@ main() {
   test_mount_snapshot_timeout_window
   test_apply_status_refetches_snapshots_on_finished_at_change
   test_status_payload_carries_finished_at
+  test_logproc_uses_omarchy_launch_editor_with_xdg_open_fallback
+  test_logproc_has_on_exited_feedback
   test_readme_mount_path_matches_script
   test_no_dead_entry_time
   test_group_backup_id_defaults_to_name
