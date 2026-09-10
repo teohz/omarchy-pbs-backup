@@ -557,7 +557,7 @@ FocusScope {
       // the file manager shows everything.
       Text {
         Layout.alignment: Qt.AlignVCenter
-        text: "Open in File Manager\u2026"
+        text: "Mount & Browse Directory\u2026"
         textFormat: Text.PlainText
         color: root.accent
         font.family: root.fontFamily
@@ -566,7 +566,7 @@ FocusScope {
           anchors.fill: parent
           cursorShape: Qt.PointingHandCursor
           onClicked: {
-            PbsBackupStore.openMountPoint()
+            PbsBackupStore.openMountPointWithNotify()
             root.takeFocus()
           }
         }
@@ -574,6 +574,15 @@ FocusScope {
     }
 
     // --- restore ---------------------------------------------------------
+    MenuRow {
+      width: parent.width
+      visible: PbsBackupStore.mountPoint !== "" && !PbsBackupStore.restoreBusy
+      label: "Unmount"
+      foreground: root.foreground
+      fontFamily: root.fontFamily
+      onClicked: PbsBackupStore.unmount()
+    }
+
     PanelSeparator { width: parent.width }
 
     MenuRow {

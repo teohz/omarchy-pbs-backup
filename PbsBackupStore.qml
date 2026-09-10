@@ -250,7 +250,22 @@ Singleton {
     mountProc.running = true
   }
 
+  // Same as openMountPoint but also fires a notification so the user
+  // has a breadcrumb of where the mount lives and when it goes away.
+  // The notification runs in a one-shot child so it can't block the
+  // panel's xdg-open handoff.
+  function openMountPointWithNotify() {
+    if (!mountPoint) return
+    mountProc.command = ["xdg-open", String(mountPoint)]
+    mountProc.running = true
+    mountNotifyProc.command = ["/bin/sh", "-c",
+      "MOUNT_BROWSE_PATH=" + JSON.stringify(String(mountPoint)) + " '" +
+      self.cli + "' mount_browse_notify"]
+    mountNotifyProc.running = true
+  }
+
   Process { id: mountProc }
+  Process { id: mountNotifyProc }
 
   // --- snapshots --------------------------------------------------------
   // Which group the restore browser is looking at. Separate from anything

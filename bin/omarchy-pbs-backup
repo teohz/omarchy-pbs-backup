@@ -101,6 +101,22 @@ notify() {
   return 0
 }
 
+# Terse breadcrumb fired when the user opens the FUSE mount via the
+# restore browser. Reads MOUNT_BROWSE_PATH from the env (set by the
+# QML Process wrapper) so the body line is honest about both where the
+# mount lives and when it goes away — there is no 24h sweep; cleanup
+# is via the next backup's existing private_dir, the explicit Unmount
+# menu row, or a reboot.
+mount_browse_notify() {
+  [ -n "${OMARCHY_PBS_BACKUP_QUIET:-}" ] && return 0
+  [ -n "${MOUNT_BROWSE_PATH:-}" ] || return 0
+  notify-send -a "$(basename -- "$0")" \
+    "PBS Backup — restore mount" \
+    "Mounted at $MOUNT_BROWSE_PATH. Persists until next backup or Unmount." \
+    >/dev/null 2>&1 || true
+  return 0
+}
+
 # ---------------------------------------------------------------------------
 # File safety
 # ---------------------------------------------------------------------------

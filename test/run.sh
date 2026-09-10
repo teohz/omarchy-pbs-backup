@@ -1214,10 +1214,12 @@ test_mount_browse_button_renamed() {
 test_unmount_menu_row_present() {
   # Look for a MenuRow whose label is exactly "Unmount" inside the
   # RestoreBrowser.qml file (more precise than a free-text grep).
+  # Tolerant of any indentation (RestoreBrowser.qml uses 4-space, but
+  # the MenuRow component itself uses 2-space).
   if awk '
-    /^  MenuRow \{/ { capture = 1; block = ""; next }
+    /^[[:space:]]+MenuRow \{/ { capture = 1; block = ""; next }
     capture { block = block $0 ORS }
-    capture && /^  \}/ { if (block ~ /label: *"Unmount"/) { found = 1 }; capture = 0 }
+    capture && /^[[:space:]]+\}/ { if (block ~ /label: *"Unmount"/) { found = 1 }; capture = 0 }
     END { exit (found ? 0 : 1) }
   ' RestoreBrowser.qml; then
     printf '  ok    Unmount MenuRow present\n'
