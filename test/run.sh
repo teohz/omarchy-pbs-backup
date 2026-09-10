@@ -1283,6 +1283,90 @@ test_restore_qml_passes_copy_source() {
   fi
   TESTS_RUN=$((TESTS_RUN + 1))
 }
+
+test_mount_snapshot_no_kill_on_timeout() {
+  # Regression for Bug 4: mount_snapshot used to kill the FUSE process
+  # on timeout (kill "$mount_pid" after a hardcoded 5s wait), which
+  # meant every retry started a fresh PBS connection from cold. The
+  # new behaviour is: on timeout, return 1 but leave the FUSE process
+  # alone — the next click hits the `if mountpoint -q` shortcut once
+  # the mount eventually comes up. This test asserts both:
+  #   1. mount_snapshot returns 1 after the timeout window
+  #   2. the FUSE process is still alive (NOT killed by mount_snapshot)
+  # We override pbs_run to exec `sleep 30` (so the "FUSE process" stays
+  # alive), override `mountpoint` to always report failure, and set
+  # MOUNT_WAIT_SECONDS=3 to keep the test fast. Source the script in
+  # a subshell so the function overrides don't leak into other tests.
+  setup_isolated_home
+  mkdir -p -- "$XDG_CONFIG_HOME/omarchy-pbs-backup"
+  cp "$FIXTURES/config-valid.json" "$XDG_CONFIG_HOME/omarchy-pbs-backup/config.json"
+
+  local fake_bin="$tmp/fakebin"
+  mkdir -p -- "$fake_bin"
+  # `mountpoint` always reports "not a mountpoint" — forces the
+  # wait loop to run out the clock.
+  cat > "$fake_bin/mountpoint" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x -- "$fake_bin/mountpoint"
+
+  # We source the script and override pbs_run so the "FUSE process"
+  # is a long-lived `sleep`. mount_snapshot backgrounds it with `&`
+  # and captures the PID via `$!`. The function must NOT kill that
+  # PID on timeout. Capture the subshell's stdout to read the rc + pid.
+  local result
+  result="$(
+    export PATH="$fake_bin:$PATH"
+    source "$SCRIPT" >/dev/null 2>&1 || true
+    pbs_run() { exec sleep 30; }
+    MOUNT_WAIT_SECONDS=3
+    MOUNT_ROOT="$XDG_STATE_HOME/omarchy-pbs-backup/mounts"
+    GROUP_NAME="external-disk"
+    local snap="host/external-disk/2026-09-09T15:00:00Z"
+    local archive="external-disk.pxar"
+    mount_snapshot "$snap" "$archive" >/dev/null 2>&1
+    local rc=$?
+    local sleep_pid
+    sleep_pid="$(pgrep -f '^sleep 30$' | head -1 || true)"
+    printf 'rc=%d sleep_pid=%s\n' "$rc" "$sleep_pid"
+  )"
+  # Clean up any orphan sleep 30 from this test before asserting.
+  pkill -f '^sleep 30$' 2>/dev/null || true
+  local rc sleep_pid
+  rc="$(printf '%s' "$result" | sed -n 's/^rc=\([0-9]*\).*/\1/p')"
+  sleep_pid="$(printf '%s' "$result" | sed -n 's/^.*sleep_pid=\(.*\)$/\1/p')"
+  if [ "$rc" = "1" ] && [ -n "$sleep_pid" ] && [ "$sleep_pid" != "0" ]; then
+    # sleep_pid was reported; we cleaned up via pkill. The structural
+    # assertion (function still alive at the moment of measurement)
+    # is verified above; the pkill is best-effort cleanup of the
+    # orphan that mount_snapshot intentionally left behind.
+    printf '  ok    mount_snapshot returns 1 on timeout and leaves FUSE alive\n'
+  else
+    printf '  FAIL  mount_snapshot timeout behaviour broken: %s\n' "$result"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  rm -rf -- "$tmp"
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
+test_mount_snapshot_timeout_window() {
+  # Source-grep guard for Bug 4: mount_snapshot's timeout must be at
+  # least 30s (matches STALE_PROGRESS_SECONDS so the bar's UI lag and
+  # the mount timeout feel the same), and must NOT unconditionally
+  # kill the FUSE process on timeout. Catches re-introduction of the
+  # old "kill after 5s wait" behaviour.
+  local body
+  body="$(awk '/^mount_snapshot\(\)/,/^}/' bin/omarchy-pbs-backup)"
+  if printf '%s' "$body" | grep -q 'MOUNT_WAIT_SECONDS:-30' \
+     && ! printf '%s' "$body" | grep -qE 'kill "\$mount_pid"'; then
+    printf '  ok    mount_snapshot uses 30s timeout and does not kill FUSE (Bug 4 guard)\n'
+  else
+    printf '  FAIL  mount_snapshot timeout/kill policy regressed (Bug 4)\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
 test_restore_file_via_cp() {
   setup_isolated_home
   mkdir -p -- "$XDG_CONFIG_HOME/omarchy-pbs-backup"
@@ -1701,6 +1785,8 @@ main() {
   test_mount_browse_sends_terise_notify
   test_no_self_dot_in_qml
   test_restore_qml_passes_copy_source
+  test_mount_snapshot_no_kill_on_timeout
+  test_mount_snapshot_timeout_window
   test_readme_mount_path_matches_script
   test_no_dead_entry_time
   test_group_backup_id_defaults_to_name

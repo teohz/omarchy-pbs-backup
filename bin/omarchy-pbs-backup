@@ -868,24 +868,35 @@ mount_snapshot() {
   # the panel.
   pbs_run mount "$snapshot_id" "$archive" "$mp" &
   local mount_pid=$!
-  # Wait briefly for the mount to come up; PBS writes a "starting" line first.
+  # Wait for the mount to come up. PBS writes a "starting" line first;
+  # on a cold connection (TLS handshake + auth + manifest resolution)
+  # this can take a few seconds. We poll for up to MOUNT_WAIT_SECONDS
+  # (default 30) before giving up. Matches STALE_PROGRESS_SECONDS so
+  # the bar's UI lag and the mount timeout feel the same.
   local waited=0
-  while [ "$waited" -lt 50 ]; do
+  local deadline="${MOUNT_WAIT_SECONDS:-30}"
+  while [ "$waited" -lt "$deadline" ]; do
     if mountpoint -q -- "$mp" 2>/dev/null; then
       return 0
     fi
-    sleep 0.1
+    # If the PBS mount process died on its own, surface that immediately
+    # instead of waiting out the timeout (real auth failure, bad snapshot
+    # id, no namespace, etc.).
+    if ! kill -0 "$mount_pid" 2>/dev/null; then
+      wait "$mount_pid" 2>/dev/null || true
+      rmdir -- "$mp" 2>/dev/null
+      return 1
+    fi
+    sleep 1
     waited=$((waited + 1))
   done
-  # Mount never came up. If the PBS process is still alive, kill it; if
-  # it died, harvest its exit status. Either way the caller gets 1.
-  if kill -0 "$mount_pid" 2>/dev/null; then
-    kill "$mount_pid" 2>/dev/null || true
-    wait "$mount_pid" 2>/dev/null || true
-  else
-    wait "$mount_pid" 2>/dev/null || true
-  fi
-  rmdir -- "$mp" 2>/dev/null
+  # Mount still hasn't come up but the FUSE process is alive and trying.
+  # Don't kill it: killing on timeout was the root cause of the
+  # 'mount fails first time, works second time' race (each retry started
+  # a fresh PBS connection from cold). Return 1 to the caller; the next
+  # click will hit the `if mountpoint -q` shortcut at the top once the
+  # mount eventually arrives. FUSE processes are cheap (~1-2 MB); the
+  # next cmd_backup / cmd_unmount cleans any orphan up.
   return 1
 }
 
@@ -902,7 +913,7 @@ cmd_mount() {
     printf 'Mounted %s (%s) at %s\n' "$OPT_SNAPSHOT" "$OPT_ARCHIVE" "$mp"
     return 0
   fi
-  die "mount did not appear within 5s; check PBS connectivity"
+    die "mount did not appear within ${MOUNT_WAIT_SECONDS:-30}s; check PBS connectivity"
 }
 
 cmd_unmount() {
