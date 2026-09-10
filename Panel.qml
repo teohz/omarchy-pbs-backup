@@ -69,9 +69,11 @@ Panel {
   onOpenedChanged: {
     if (!opened) {
       root.browsing = false
-      // Release the FUSE mount. Fire-and-forget: unmount() drops its
-      // own result, and the panel is closing anyway.
-      PbsBackupStore.unmount()
+      // Mounts persist across panel sessions. They die at the next
+      // backup run via `private_dir $STATE_DIR mounts`, or at the
+      // explicit Unmount menu row in the restore browser. Auto-unmounting
+      // here tore down the FUSE mount the moment the user opened a file
+      // manager — the file manager then showed 0-byte entries.
       return
     }
     PbsBackupStore.refresh()

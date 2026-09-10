@@ -614,19 +614,19 @@ SH
 # closes. The README and the PbsBackupStore header comment both promise
 # this; the code didn't deliver, so the FUSE mount survived every
 # panel open/close cycle.
-test_panel_close_unmounts() {
-  # Extract the onOpenedChanged handler — everything from the line that
-  # introduces it up to the next blank line.
+test_panel_close_does_not_unmount() {
+  # Bug 2 regression: opening a file manager from the panel used to
+  # tear down the FUSE mount (panel "closed" on focus loss →
+  # onOpenedChanged fired PbsBackupStore.unmount → file manager showed
+  # 0-byte entries). The fix drops the unmount; mounts persist until
+  # the next backup run or an explicit Unmount menu row.
   local fn
-  fn="$(awk '
-    /onOpenedChanged:/ { inside=1 }
-    inside { print; if (NF == 0 || /^[[:space:]]*[}]/) exit }
-  ' Panel.qml)"
-  if printf '%s\n' "$fn" | grep -q 'PbsBackupStore.unmount'; then
-    printf '  ok    Panel.qml calls PbsBackupStore.unmount on close\n'
-  else
-    printf '  FAIL  Panel.qml does not call PbsBackupStore.unmount on close\n'
+  fn="$(awk '/^  onOpenedChanged:/,/^  }/' Panel.qml)"
+  if printf '%s' "$fn" | grep -q 'PbsBackupStore.unmount'; then
+    printf '  FAIL  Panel.qml onOpenedChanged still calls PbsBackupStore.unmount\n'
     TESTS_FAILED=$((TESTS_FAILED + 1))
+  else
+    printf '  ok    Panel.qml does not unmount on focus loss\n'
   fi
   TESTS_RUN=$((TESTS_RUN + 1))
 }
@@ -1164,10 +1164,84 @@ test_cmd_ls_jq_does_not_index_accumulator() {
   TESTS_RUN=$((TESTS_RUN + 1))
 }
 
-# Bug 1: --copy-source restores the selected file/dir via cp from the
-# FUSE mount, not via PBS restore (which would always extract the
-# whole archive). Tests use a plain tmp dir as a stand-in for the
-# mountpoint; cp doesn't care that it's not actually FUSE.
+test_restore_falls_back_to_pbs() {
+  setup_isolated_home
+  mkdir -p -- "$XDG_CONFIG_HOME/omarchy-pbs-backup"
+  cp "$FIXTURES/config-valid.json" "$XDG_CONFIG_HOME/omarchy-pbs-backup/config.json"
+
+  # No --copy-source, and no actual PBS server: the restore must still
+  # go through the PBS code path (proxmox-backup-client restore ...).
+  # We assert the script tries to run the PBS command and fails with
+  # the expected "no secret" error, NOT with a cp-related error.
+  local out code
+  out="$(HOME="$tmp" "$SCRIPT" restore \
+      --dest external-drive \
+      --snapshot host/external-drive/2026-09-09T15:00:00Z \
+      --archive external-drive.ppxar.didx \
+      --path "restic/config" \
+      --json 2>&1)"
+  code=$?
+  if printf '%s' "$out" | grep -qE 'cp:|no secret|no repository|repository'; then
+    printf '  ok    restore without --copy-source falls back to PBS (got expected error)\n'
+  else
+    printf '  FAIL  unexpected fallback output: code=%d out=%s\n' "$code" "$out"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  rm -rf -- "$tmp"
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
+# Bug 2: the "Open in File Manager…" affordance is renamed and a
+# Unmount menu row sits next to it, both visible only when a mount is
+# active. Terse notification text is sent via notify-send.
+test_mount_browse_button_renamed() {
+  if grep -q 'Mount & Browse Directory' RestoreBrowser.qml; then
+    printf '  ok    button renamed to "Mount & Browse Directory"\n'
+  else
+    printf '  FAIL  button not renamed\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+  if grep -q 'Open in File Manager' RestoreBrowser.qml; then
+    printf '  FAIL  legacy "Open in File Manager…" string still present\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  else
+    printf '  ok    no "Open in File Manager…" string remains\n'
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
+test_unmount_menu_row_present() {
+  # Look for a MenuRow whose label is exactly "Unmount" inside the
+  # RestoreBrowser.qml file (more precise than a free-text grep).
+  if awk '
+    /^  MenuRow \{/ { capture = 1; block = ""; next }
+    capture { block = block $0 ORS }
+    capture && /^  \}/ { if (block ~ /label: *"Unmount"/) { found = 1 }; capture = 0 }
+    END { exit (found ? 0 : 1) }
+  ' RestoreBrowser.qml; then
+    printf '  ok    Unmount MenuRow present\n'
+  else
+    printf '  FAIL  no Unmount MenuRow in RestoreBrowser.qml\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
+test_mount_browse_sends_terise_notify() {
+  # The notification script (PbsBackupStore.openMountPointWithNotify
+  # → bash helper `mount_browse_notify`) must include the mount path
+  # and a hint about how to clean up. Grep for the literal strings in
+  # PbsBackupStore.qml + bin/omarchy-pbs-backup.
+  if grep -q 'mount_browse_notify\|Mounted at' bin/omarchy-pbs-backup \
+     && grep -q 'mount_point\|mountPoint' PbsBackupStore.qml; then
+    printf '  ok    mount-browse notification wired through bash helper\n'
+  else
+    printf '  FAIL  mount-browse notification script or wiring missing\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
 test_restore_file_via_cp() {
   setup_isolated_home
   mkdir -p -- "$XDG_CONFIG_HOME/omarchy-pbs-backup"
@@ -1282,35 +1356,6 @@ test_restore_target_dir_no_basename() {
   TESTS_RUN=$((TESTS_RUN + 1))
 }
 
-test_restore_falls_back_to_pbs() {
-  setup_isolated_home
-  mkdir -p -- "$XDG_CONFIG_HOME/omarchy-pbs-backup"
-  cp "$FIXTURES/config-valid.json" "$XDG_CONFIG_HOME/omarchy-pbs-backup/config.json"
-
-  # No --copy-source, and no actual PBS server: the restore must still
-  # go through the PBS code path (proxmox-backup-client restore ...).
-  # We assert the script tries to run the PBS command and fails with
-  # the expected "no secret" error, NOT with a cp-related error.
-  local out code
-  out="$(HOME="$tmp" "$SCRIPT" restore \
-      --dest external-drive \
-      --snapshot host/external-drive/2026-09-09T15:00:00Z \
-      --archive external-drive.ppxar.didx \
-      --path "restic/config" \
-      --json 2>&1)"
-  code=$?
-  if printf '%s' "$out" | grep -qE 'cp:|no secret|no repository|repository'; then
-    printf '  ok    restore without --copy-source falls back to PBS (got expected error)\n'
-  else
-    printf '  FAIL  unexpected fallback output: code=%d out=%s\n' "$code" "$out"
-    TESTS_FAILED=$((TESTS_FAILED + 1))
-  fi
-  rm -rf -- "$tmp"
-  TESTS_RUN=$((TESTS_RUN + 1))
-}
-
-# A1: `backup` with no args and no --all must error with a helpful
-# message instead of silently defaulting to the first group.
 test_backup_requires_dest_or_all() {
   setup_isolated_home
   mkdir -p -- "$XDG_CONFIG_HOME/omarchy-pbs-backup"
@@ -1609,8 +1654,10 @@ main() {
   test_load_archives_dispatches
   test_confirm_cancel_clears_target
   test_cmd_config_create_detaches_editor
-  test_panel_close_unmounts
-  test_group_detail_no_data_added_bytes
+  test_panel_close_does_not_unmount
+  test_mount_browse_button_renamed
+  test_unmount_menu_row_present
+  test_mount_browse_sends_terise_notify
   test_readme_mount_path_matches_script
   test_no_dead_entry_time
   test_group_backup_id_defaults_to_name
