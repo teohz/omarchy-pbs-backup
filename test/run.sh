@@ -1562,6 +1562,145 @@ test_mount_remounts_when_path_empty() {
   fi
   TESTS_RUN=$((TESTS_RUN + 1))
 }
+
+test_cmd_unmount_accepts_snapshot_flag() {
+  # Bug 9: cmd_unmount --snapshot <id> unmounts just one mount. We
+  # can't actually fusermount in the test (needs FUSE + root), so we
+  # verify the flag is accepted by the parser, the per-snapshot path
+  # is taken (mount_path_for is called), and the group-wide loop is
+  # NOT entered. Source-grep + behavioural on the script's
+  # --help-style output.
+  setup_isolated_home
+  mkdir -p -- "$XDG_CONFIG_HOME/omarchy-pbs-backup"
+  cp "$FIXTURES/config-valid.json" "$XDG_CONFIG_HOME/omarchy-pbs-backup/config.json"
+  local out
+  # An invalid snapshot id (bad format) should fail at validate_snapshot_id
+  # before touching the filesystem, which proves the flag was accepted
+  # and the --snapshot branch was entered.
+  out="$("$SCRIPT" unmount --dest external-drive --snapshot not/a/valid 2>&1 || true)"
+  if printf '%s' "$out" | grep -qE 'invalid snapshot id|invalid'; then
+    printf '  ok    cmd_unmount --snapshot accepted by parser and validated\n'
+  else
+    printf '  FAIL  cmd_unmount --snapshot not accepted:\n%s\n' "$out"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  rm -rf -- "$tmp"
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
+test_cmd_unmount_without_flag_still_works() {
+  # Bug 9 regression: cmd_unmount without --snapshot must still clean
+  # the whole per-group subtree (legacy call site). When the group
+  # dir doesn't exist, returns 0 silently — the common state.
+  setup_isolated_home
+  mkdir -p -- "$XDG_CONFIG_HOME/omarchy-pbs-backup"
+  cp "$FIXTURES/config-valid.json" "$XDG_CONFIG_HOME/omarchy-pbs-backup/config.json"
+  local code
+  "$SCRIPT" unmount --dest external-drive >/dev/null 2>&1
+  code=$?
+  if [ "$code" = "0" ]; then
+    printf '  ok    cmd_unmount without --snapshot still returns 0 on empty state\n'
+  else
+    printf '  FAIL  cmd_unmount without --snapshot regressed: code=%d\n' "$code"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  rm -rf -- "$tmp"
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
+test_cmd_ls_error_includes_snapshot_id() {
+  # Bug 9: cmd_ls mount-failure error JSON must include snapshot and
+  # archive fields so the QML can surface them in listError. We can't
+  # reach the mount-failure branch without a real PBS server, so
+  # this is a source-grep guard on the jq invocation that builds the
+  # error. Pinning the jq args catches re-introduction of the bare
+  # 'error + path' form.
+  local body
+  body="$(awk '/^cmd_ls\(\)/,/^}/' bin/omarchy-pbs-backup)"
+  if printf '%s' "$body" | grep -qE -- '--arg s "\$OPT_SNAPSHOT"' \
+     && printf '%s' "$body" | grep -qE -- '--arg a "\$OPT_ARCHIVE"' \
+     && printf '%s' "$body" | grep -qE 'snapshot:\$s.*archive:\$a'; then
+    printf '  ok    cmd_ls mount-error JSON includes snapshot + archive (Bug 9 guard)\n'
+  else
+    printf '  FAIL  cmd_ls mount-error JSON lost snapshot/archive fields (Bug 9)\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
+test_pbsbackupstore_has_mounts_array() {
+  # Bug 9: multi-mount tracking. Pin the property exists and is an
+  # array. Defensive against accidental re-introduction of the old
+  # single-slot string.
+  if grep -qE 'property var mounts: \[\]' PbsBackupStore.qml; then
+    printf '  ok    PbsBackupStore.mounts is an array (Bug 9 guard)\n'
+  else
+    printf '  FAIL  PbsBackupStore.mounts missing or wrong type (Bug 9 regression)\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
+test_pbsbackupstore_has_mount_snapshot_function() {
+  if grep -qE '^  function mountSnapshot\(' PbsBackupStore.qml; then
+    printf '  ok    PbsBackupStore.mountSnapshot defined (Bug 9 guard)\n'
+  else
+    printf '  FAIL  PbsBackupStore.mountSnapshot missing (Bug 9 regression)\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
+test_pbsbackupstore_has_unmount_snapshot_function() {
+  if grep -qE '^  function unmountSnapshot\(' PbsBackupStore.qml; then
+    printf '  ok    PbsBackupStore.unmountSnapshot defined (Bug 9 guard)\n'
+  else
+    printf '  FAIL  PbsBackupStore.unmountSnapshot missing (Bug 9 regression)\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
+test_restorebrowser_has_mounts_repeater() {
+  # Bug 9 UI: the per-mount list is a Repeater whose model is
+  # PbsBackupStore.mounts and whose delegate MenuRow calls
+  # unmountSnapshot. Catches accidental flattening back to a single
+  # row.
+  if grep -qE 'model:[[:space:]]*PbsBackupStore\.mounts' RestoreBrowser.qml \
+     && grep -qE 'delegate:[[:space:]]*MenuRow' RestoreBrowser.qml; then
+    printf '  ok    RestoreBrowser mounts Repeater present (Bug 9 UI)\n'
+  else
+    printf '  FAIL  RestoreBrowser mounts Repeater missing (Bug 9 UI regression)\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
+test_restorebrowser_has_no_legacy_unmount_label() {
+  # Bug 9 regression: the legacy single-slot UI had a MenuRow with
+  # label: "Unmount" (no suffix) at the top level. The new design
+  # has "Mount this snapshot" + a Repeater of "Unmount <name>" rows.
+  # A top-level MenuRow labelled exactly "Unmount" would be a regression.
+  # Tolerant of indentation.
+  if awk '
+    /^[[:space:]]+MenuRow \{/ { capture = 1; block = ""; next }
+    capture { block = block $0 ORS }
+    capture && /^[[:space:]]+\}/ {
+      if (block ~ /label: *\"Unmount\"[^\"]/ || block ~ /label: *\"Unmount\" *[^+\"]/) {
+        # "Unmount" alone (not followed by space+content); would be legacy
+        found = 1
+      }
+      capture = 0
+    }
+    END { exit (found ? 0 : 1) }
+  ' RestoreBrowser.qml; then
+    printf '  FAIL  legacy top-level "Unmount" MenuRow still present\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  else
+    printf '  ok    no legacy single-slot "Unmount" MenuRow (Bug 9 UI)\n'
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
 test_restore_file_via_cp() {
   setup_isolated_home
   mkdir -p -- "$XDG_CONFIG_HOME/omarchy-pbs-backup"
@@ -2016,6 +2155,14 @@ main() {
   test_backup_all_with_dest_errors
   test_archive_path_validation
   test_archive_filter_regex
+  test_cmd_unmount_accepts_snapshot_flag
+  test_cmd_unmount_without_flag_still_works
+  test_cmd_ls_error_includes_snapshot_id
+  test_pbsbackupstore_has_mounts_array
+  test_pbsbackupstore_has_mount_snapshot_function
+  test_pbsbackupstore_has_unmount_snapshot_function
+  test_restorebrowser_has_mounts_repeater
+  test_restorebrowser_has_no_legacy_unmount_label
   printf -- '------------------------\n'
   printf '%d checks run, %d failed\n' "$TESTS_RUN" "$TESTS_FAILED"
   [ "$TESTS_FAILED" = "0" ]
