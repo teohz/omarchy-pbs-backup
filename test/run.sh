@@ -227,6 +227,51 @@ JSON
   rm -rf -- "$tmp"
 }
 
+test_cmd_install_no_schedule_returns_nonzero() {
+  # Bug 9 (was M10): when no group has a schedule, cmd_install used
+  # to return 0, which silently lied about the install state to
+  # shell callers (`omarchy-pbs-backup install && echo ok`). Now it
+  # returns 1 so the message "nothing was enabled" actually reaches
+  # the caller as a non-zero exit. We override XDG_CONFIG_HOME and
+  # HOME so the script uses the test config and a private systemd
+  # unit dir. Without a real `systemctl --user` we can't run the
+  # full install, so we test the no-schedule path by giving the
+  # config no `schedule` field on any group.
+  setup_isolated_home
+  mkdir -p -- "$XDG_CONFIG_HOME/omarchy-pbs-backup"
+  cat > "$XDG_CONFIG_HOME/omarchy-pbs-backup/config.json" <<'JSON'
+{
+  "pbs": {
+    "repository": "backup@pbs!backup@pbs-host.example.com:datastore",
+    "fingerprint": "aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99:aa:bb:cc:dd:ee:ff:00:11:22:33:44:55"
+  },
+  "namespace": "teohz/core",
+  "groups": [
+    {"name": "external-disk", "display_name": "External Drive",
+     "source": "/mnt/external",
+     "retention": {"daily": 7, "weekly": 4, "monthly": 12, "yearly": 3}}
+  ]
+}
+JSON
+  # Isolated systemd user dir so the script doesn't touch the real one.
+  local fake_systemd="$tmp/fake-systemd"
+  mkdir -p -- "$fake_systemd"
+  # Override SYSTEMD_DIR via environment — the script reads it from
+  # a derived path based on XDG_CONFIG_HOME/systemd/user, which
+  # setup_isolated_home already redirects.
+  local code
+  XDG_CONFIG_HOME="$XDG_CONFIG_HOME" "$SCRIPT" install >/dev/null 2>&1
+  code=$?
+  if [ "$code" = "1" ]; then
+    printf '  ok    cmd_install with no schedule returns 1 (Bug 9 / M10)\n'
+  else
+    printf '  FAIL  cmd_install no-schedule code=%d (want 1)\n' "$code"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  rm -rf -- "$tmp"
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
 test_state_dirs_outside_plugin_dir() {
   # The plugin code lives at PLUGIN_DIR (set inside the script as the parent
   # of bin/). Config and state must NOT live under PLUGIN_DIR, otherwise
@@ -2156,6 +2201,7 @@ main() {
   test_status_with_state_file
   test_status_pre_extracts_group_table
   test_status_multi_group_carries_display_name_and_schedule
+  test_cmd_install_no_schedule_returns_nonzero
   test_state_dirs_outside_plugin_dir
   test_backup_no_json_flag
   test_pbs_group_helper

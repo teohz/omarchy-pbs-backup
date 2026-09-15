@@ -1528,7 +1528,15 @@ cmd_install() {
   if [ "${#names[@]}" -eq 0 ]; then
     printf '\nNo group has a schedule, so nothing runs automatically.\n'
     printf 'Set a schedule in config.json (for example "Sun *-*-* 03:00:00") and run this again.\n'
-    return 0
+    # Bug 9 (was M10): the previous code returned 0 here, which made
+    # `omarchy-pbs-backup install && echo ok` succeed even though
+    # nothing was actually installed. The systemd state-dir cleanup
+    # above still ran (removing stale timers for removed groups, which
+    # is real progress), but the user-visible outcome is "no timers
+    # are now scheduled". Exit 1 so callers can detect that. The
+    # message stays friendly — most users hit this from a typo'd
+    # config and the message tells them what to fix.
+    return 1
   fi
 
   local failures=0
