@@ -536,7 +536,6 @@ Singleton {
       }
     }
   }
-  Process { id: unmountProc }
   Process { id: unmountNotifyProc }
 
   // --- snapshots --------------------------------------------------------
