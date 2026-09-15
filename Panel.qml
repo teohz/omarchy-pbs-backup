@@ -36,8 +36,8 @@ Panel {
   readonly property color barIconColor: {
     if (PbsBackupStore.running) return accent
     if (PbsBackupStore.failed) return urgent
-    if (!PbsBackupStore.configured) return Qt.darker(barForeground, 1.9)
-    return barForeground
+    if (!PbsBackupStore.configured) return Qt.darker(foreground, 1.9)
+    return foreground
   }
 
   // Panel is a bare Item with no size of its own, so without this the bar

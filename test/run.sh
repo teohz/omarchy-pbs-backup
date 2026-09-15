@@ -370,6 +370,33 @@ JSON
   TESTS_RUN=$((TESTS_RUN + 1))
 }
 
+test_panel_bar_icon_color_uses_foreground() {
+  # Bug 10: Panel.qml lines 39-40 referenced \`barForeground\`, a
+  # property that was never defined — only \`foreground\` exists
+  # (defined line 24 as \`bar ? bar.foreground : Color.foreground\`).
+  # barIconColor evaluated to undefined, the icon Text element got
+  # an undefined color, and the glyph rendered invisible. The fix
+  # renames the two references to \`foreground\`. This guard pins
+  # the absence of \`barForeground\` (excluding comments) and the
+  # presence of \`return foreground\` at the end of barIconColor.
+  local hits
+  hits="$(grep -nE '\bbarForeground\b' Panel.qml | grep -vE ':[[:space:]]*#' || true)"
+  if [ -n "$hits" ]; then
+    printf '  FAIL  barForeground still referenced in Panel.qml (Bug 10 regression):\n%s\n' "$hits"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  if ! awk '/^  readonly property color barIconColor:/,/^  }/' Panel.qml \
+       | grep -qE 'return foreground'; then
+    printf '  FAIL  barIconColor does not return foreground (Bug 10 regression)\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  if [ -z "$hits" ] && awk '/^  readonly property color barIconColor:/,/^  }/' Panel.qml \
+     | grep -qE 'return foreground'; then
+    printf '  ok    barIconColor returns foreground (Bug 10 guard)\n'
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
 test_state_dirs_outside_plugin_dir() {
   # The plugin code lives at PLUGIN_DIR (set inside the script as the parent
   # of bin/). Config and state must NOT live under PLUGIN_DIR, otherwise
@@ -2302,6 +2329,7 @@ main() {
   test_cmd_install_no_schedule_returns_nonzero
   test_progress_write_throttle_uses_file_updated_epoch
   test_progress_write_throttle_skips_recent_writes
+  test_panel_bar_icon_color_uses_foreground
   test_state_dirs_outside_plugin_dir
   test_backup_no_json_flag
   test_pbs_group_helper
