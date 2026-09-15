@@ -745,6 +745,19 @@ cmd_status() {
   installed=false
   readable_file "$SYSTEMD_DIR/omarchy-pbs-backup@.service" && installed=true
 
+  # Bug 9 (was M9): pre-extract {name, display_name, schedule} for every
+  # group in a single jq call. The old loop ran two jq selectors per
+  # group against CONFIG_JSON (display_name + schedule lookups), which
+  # is fine for 1-3 groups but adds up at scale — each call spawns a
+  # new jq process and re-parses the whole config. With N groups the
+  # old code was 2N jq calls per poll; now it's 1.
+  local -A group_label=() group_schedule=()
+  local gn gl gs
+  while IFS=$'\t' read -r gn gl gs; do
+    group_label["$gn"]="$gl"
+    group_schedule["$gn"]="$gs"
+  done < <(jq -r '.groups[] | [.name, (.display_name // .name), (.schedule // "")] | @tsv' <<<"$CONFIG_JSON")
+
   while IFS= read -r name; do
     [ -n "$name" ] || continue
     progress="$(read_json_or "$STATE_DIR/progress-$name.json" 'null')"
@@ -766,9 +779,9 @@ cmd_status() {
 
     out="$(jq -c \
       --arg name "$name" \
-      --arg label "$(jq -r --arg n "$name" '.groups[] | select(.name==$n) | .display_name // $n' <<<"$CONFIG_JSON")" \
+      --arg label "${group_label[$name]:-$name}" \
       --argjson stored "$(jq -c --arg n "$name" '.groups[$n] // {}' <<<"$status")" \
-      --arg schedule "$(jq -r --arg n "$name" '.groups[] | select(.name==$n) | .schedule // ""' <<<"$CONFIG_JSON")" \
+      --arg schedule "${group_schedule[$name]:-}" \
       --argjson running "$running" \
       --argjson progress "$progress" \
       '. + [$stored + {name:$name, display_name:$label,

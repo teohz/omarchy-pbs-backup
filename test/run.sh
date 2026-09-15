@@ -164,6 +164,69 @@ test_status_with_state_file() {
   rm -rf -- "$tmp"
 }
 
+test_status_pre_extracts_group_table() {
+  # Bug 9 (was M9): cmd_status used to run two jq selectors per group
+  # against CONFIG_JSON (display_name + schedule lookups). Now it
+  # pre-extracts them in a single jq call and indexes via bash
+  # associative arrays. Source-grep guard: pin the pre-extract pattern
+  # and the array-index access, so a future regression that re-inlines
+  # the per-group jq selectors fails this test.
+  local body
+  body="$(awk '/^cmd_status\(\)/,/^}/' bin/omarchy-pbs-backup)"
+  if printf '%s' "$body" | grep -qE 'group_label=\(\)|group_schedule=\(\)' \
+     && printf '%s' "$body" | grep -qE 'group_label\[\$name\]' \
+     && printf '%s' "$body" | grep -qE 'group_schedule\[\$name\]' \
+     && printf '%s' "$body" | grep -qE '@tsv'; then
+    printf '  ok    cmd_status pre-extracts group table in one jq (Bug 9 / M9)\n'
+  else
+    printf '  FAIL  cmd_status lost the pre-extract pattern (Bug 9 / M9 regression)\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
+test_status_multi_group_carries_display_name_and_schedule() {
+  # Functional check: with two groups, the JSON output must carry
+  # display_name + schedule for both. Catches an off-by-one in the
+  # pre-extract (e.g. only the last group ends up in the lookup
+  # table, breaking the per-group JSON shape).
+  setup_isolated_home
+  mkdir -p -- "$XDG_CONFIG_HOME/omarchy-pbs-backup"
+  cat > "$XDG_CONFIG_HOME/omarchy-pbs-backup/config.json" <<'JSON'
+{
+  "pbs": {
+    "repository": "backup@pbs!backup@pbs-host.example.com:datastore",
+    "fingerprint": "aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99:aa:bb:cc:dd:ee:ff:00:11:22:33:44:55"
+  },
+  "namespace": "teohz/core",
+  "groups": [
+    {"name": "external-disk", "display_name": "External Drive",
+     "source": "/mnt/external", "schedule": "Sun *-*-* 03:00:00",
+     "retention": {"daily": 7, "weekly": 4, "monthly": 12, "yearly": 3}},
+    {"name": "testing-disk", "display_name": "Testing Disk",
+     "source": "/mnt/testing", "schedule": "Mon *-*-* 04:00:00",
+     "retention": {"daily": 7, "weekly": 4, "monthly": 12, "yearly": 3}}
+  ]
+}
+JSON
+  mkdir -p -- "$XDG_STATE_HOME/omarchy-pbs-backup"
+  cat > "$XDG_STATE_HOME/omarchy-pbs-backup/status.json" <<'JSON'
+{
+  "version": 1,
+  "groups": {
+    "external-disk": {"snapshot_count": 12, "last_run": {"result": "ok"}},
+    "testing-disk": {"snapshot_count": 8, "last_run": {"result": "ok"}}
+  }
+}
+JSON
+  local out; out="$("$SCRIPT" status --json 2>&1)"
+  assert_contains "two-group → first group display_name" '"display_name":"External Drive"' "$out"
+  assert_contains "two-group → first group schedule" '"schedule":"Sun *-*-* 03:00:00"' "$out"
+  assert_contains "two-group → second group display_name" '"display_name":"Testing Disk"' "$out"
+  assert_contains "two-group → second group schedule" '"schedule":"Mon *-*-* 04:00:00"' "$out"
+  rm -rf -- "$tmp"
+}
+
 test_state_dirs_outside_plugin_dir() {
   # The plugin code lives at PLUGIN_DIR (set inside the script as the parent
   # of bin/). Config and state must NOT live under PLUGIN_DIR, otherwise
@@ -2091,6 +2154,8 @@ main() {
   test_groups_no_groups_field
   test_status_valid_config_no_state
   test_status_with_state_file
+  test_status_pre_extracts_group_table
+  test_status_multi_group_carries_display_name_and_schedule
   test_state_dirs_outside_plugin_dir
   test_backup_no_json_flag
   test_pbs_group_helper
