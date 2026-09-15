@@ -96,6 +96,12 @@ Panel {
 
     iconComponent: Component {
       Item {
+        Rectangle {
+          color: "red"
+          anchors.fill: parent
+          opacity: 0.85
+        }
+
         Text {
           anchors.centerIn: parent
           text: PbsBackupStore.iconPbsBackup
