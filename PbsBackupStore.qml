@@ -363,7 +363,7 @@ Singleton {
 
   // Remove the entry matching snapshotId (regardless of archive —
   // there can only be one mount per snapshot under our scheme, since
-  # mount_path_for is keyed by snapshot id). No-op if not present.
+  // mount_path_for is keyed by snapshot id). No-op if not present.
   function removeMount(snapshotId) {
     var want = String(snapshotId || "")
     var copy = []
