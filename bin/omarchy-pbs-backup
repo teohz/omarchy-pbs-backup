@@ -1033,18 +1033,30 @@ cmd_ls() {
   fi
 
   # Strip the mount prefix to get the path back into archive-rooted form.
+  # `$path` is passed to jq as `$p` so each entry's `path` field can carry
+  # the full archive-relative prefix (e.g. "restic/data") instead of just
+  # the basename. Without the prefix, the QML uses `entry.path` as the
+  # restore target and the FUSE source check fails for nested files —
+  # cmd_restore falls through to `pbs restore` which extracts the entire
+  # archive (Bug 15). At --path "/" the prefix is empty so root entries
+  # stay as just the basename (no regression at the top level).
   local entries_json entries_count truncated
   entries_json="$(cd "$target" && find . -mindepth 1 -maxdepth 1 -printf '%y\0%f\0%s\0' \
-    | jq -Rs --argjson cap "$LS_ENTRY_CAP" '
+    | jq -Rs --arg p "$path" --argjson cap "$LS_ENTRY_CAP" '
         # Bind the split rows once and index that — don'\''t try to index
         # the accumulator by a numeric key (.[$i] errors on `{}` with
         # "Cannot index object with number (0)").
         split("\u0000") | .[:-1] as $rows
         | [range(0; ($rows | length); 3) as $start |
-            {type: ($rows[$start] | if . == "d" then "dir" elif . == "l" then "link" else "file" end),
-             name: $rows[$start+1],
-             size: (if $rows[$start] == "d" then null else ($rows[$start+2] | tonumber? // 0) end),
-             path: (if $rows[$start] == "d" then $rows[$start+1] + "/" else $rows[$start+1] end)}]
+            $rows[$start] as $rawtype
+            | $rows[$start+1] as $base
+            | ($p + "/" + $base) as $withPrefix
+            | (if $p == "/" then $base else $withPrefix end) as $fullBase
+            | (if $rawtype == "d" then $fullBase + "/" else $fullBase end) as $fullPath
+            | {type: ($rawtype | if . == "d" then "dir" elif . == "l" then "link" else "file" end),
+               name: $base,
+               size: (if $rawtype == "d" then null else ($rows[$start+2] | tonumber? // 0) end),
+               path: $fullPath}]
         | map(select(.name != null))
         | {entries: .[0:$cap], total: length, truncated: (length > $cap)}'
   )" || die "could not list directory"

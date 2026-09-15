@@ -1383,7 +1383,7 @@ test_cmd_ls_jq_does_not_index_accumulator() {
   canned="$(mktemp)"
   printf 'd\0restic\00\0d\0testing\00\0d\0lost+found\00\0' > "$canned"
   local out
-  out="$(jq -Rs --argjson cap 500 "$jq_block" < "$canned" 2>&1)"
+  out="$(jq -Rs --arg p "/" --argjson cap 500 "$jq_block" < "$canned" 2>&1)"
   rm -f -- "$canned"
   if printf '%s' "$out" | grep -q 'Cannot index object'; then
     printf '  FAIL  cmd_ls jq errors on canned listing: %s\n' "$out"
@@ -1393,6 +1393,125 @@ test_cmd_ls_jq_does_not_index_accumulator() {
     TESTS_FAILED=$((TESTS_FAILED + 1))
   else
     printf '  ok    cmd_ls jq produces a valid listing\n'
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
+# Bug 15: cmd_ls's jq filter was setting each entry's `path` field to
+# just the basename (the find %f output). At a nested listing (e.g.
+# --path "restic") the entries came back with path = "data" instead of
+# "restic/data", and the QML fed that basename straight to cmd_restore
+# as --path. The fast-path `cp --parents` then looked for the file at
+# <mount>/data (which doesn't exist) and fell through to `pbs restore`
+# with no --pattern — extracting the entire archive for every
+# "restore single file" click. Nested-folder navigation had the same
+# bug: enterDirectory("data") made listPath cd to <mount>/data instead
+# of <mount>/restic/data, so depth-3 listing failed with "path does
+# not exist in snapshot". The fix is for cmd_ls's jq to output the
+# full archive-relative path (with the directory prefix carried
+# through) so the QML can use entry.path verbatim everywhere.
+test_cmd_ls_jq_path_is_full_archive_relative() {
+  local fn jq_block canned out
+  fn="$(awk '/^cmd_ls\(\)/,/^}/' "$SCRIPT")"
+  jq_block="$(printf '%s\n' "$fn" | awk '
+    /split\(/ { in_block=1 }
+    in_block { print }
+    in_block && /'\''$/ { in_block=0 }
+  ' | sed 's/'\''$//')"
+  if [ -z "$jq_block" ]; then
+    printf '  FAIL  could not extract jq filter from cmd_ls\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    TESTS_RUN=$((TESTS_RUN + 1))
+    return
+  fi
+  # Canned find output for a listing of `restic/` showing two
+  # directories (`data`, `keys`) and a file (`config`). Sizes are
+  # arbitrary; we just need them to be valid numbers.
+  canned="$(mktemp)"
+  printf 'd\0data\00\0d\0keys\00\0f\0config\0\100\0' > "$canned"
+  out="$(jq -Rs --arg p "restic" --argjson cap 500 "$jq_block" < "$canned" 2>&1)"
+  rm -f -- "$canned"
+  if ! printf '%s' "$out" | grep -q '"path": *"restic/data/"'; then
+    printf '  FAIL  cmd_ls jq did not prefix nested dir with --path (Bug 15):\n%s\n' "$out"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  elif ! printf '%s' "$out" | grep -q '"path": *"restic/config"'; then
+    printf '  FAIL  cmd_ls jq did not prefix nested file with --path (Bug 15):\n%s\n' "$out"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  elif ! printf '%s' "$out" | grep -q '"name": *"config"'; then
+    printf '  FAIL  cmd_ls jq lost the basename at depth 1 (Bug 15):\n%s\n' "$out"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  else
+    printf '  ok    cmd_ls jq prefixes nested paths with --path (Bug 15)\n'
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
+# Bug 15 regression guard: at the archive root (--path "/") nothing
+# should be prefixed. The entries' `path` field is just the basename.
+# Otherwise the QML would compose "//restic" and downstream cmd_ls
+# callers would have a leading slash.
+test_cmd_ls_jq_path_unchanged_at_root() {
+  local fn jq_block canned out
+  fn="$(awk '/^cmd_ls\(\)/,/^}/' "$SCRIPT")"
+  jq_block="$(printf '%s\n' "$fn" | awk '
+    /split\(/ { in_block=1 }
+    in_block { print }
+    in_block && /'\''$/ { in_block=0 }
+  ' | sed 's/'\''$//')"
+  if [ -z "$jq_block" ]; then
+    printf '  FAIL  could not extract jq filter from cmd_ls\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    TESTS_RUN=$((TESTS_RUN + 1))
+    return
+  fi
+  canned="$(mktemp)"
+  printf 'd\0restic\00\0d\0testing\00\0d\0lost+found\00\0' > "$canned"
+  out="$(jq -Rs --arg p "/" --argjson cap 500 "$jq_block" < "$canned" 2>&1)"
+  rm -f -- "$canned"
+  if printf '%s' "$out" | grep -q '"path": *"/'; then
+    printf '  FAIL  cmd_ls jq produces leading-slash paths at root (Bug 15 regression):\n%s\n' "$out"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  elif ! printf '%s' "$out" | grep -q '"path": *"restic/"'; then
+    printf '  FAIL  cmd_ls jq lost the basename at root (Bug 15 regression):\n%s\n' "$out"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  else
+    printf '  ok    cmd_ls jq keeps basename-only paths at root (Bug 15 guard)\n'
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
+# Bug 15 regression guard: directories must carry a trailing slash
+# in their `path` field so the QML goUp() and any path-composing
+# logic downstream treat them as paths (not leaves). The pre-fix jq
+# tried to test this with `if .type == "d" then ... + "/"` but `.type`
+# was already the parsed "dir", not the raw "d", so the comparison
+# always failed and the trailing slash was never appended.
+test_cmd_ls_jq_path_has_trailing_slash_for_dirs() {
+  local fn jq_block canned out
+  fn="$(awk '/^cmd_ls\(\)/,/^}/' "$SCRIPT")"
+  jq_block="$(printf '%s\n' "$fn" | awk '
+    /split\(/ { in_block=1 }
+    in_block { print }
+    in_block && /'\''$/ { in_block=0 }
+  ' | sed 's/'\''$//')"
+  if [ -z "$jq_block" ]; then
+    printf '  FAIL  could not extract jq filter from cmd_ls\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    TESTS_RUN=$((TESTS_RUN + 1))
+    return
+  fi
+  canned="$(mktemp)"
+  printf 'd\0restic\00\0f\0config\0456\0' > "$canned"
+  out="$(jq -Rs --arg p "/" --argjson cap 500 "$jq_block" < "$canned" 2>&1)"
+  rm -f -- "$canned"
+  if ! printf '%s' "$out" | grep -q '"path": *"restic/"'; then
+    printf '  FAIL  cmd_ls jq dropped trailing slash on directory (Bug 15):\n%s\n' "$out"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  elif printf '%s' "$out" | grep -q '"path": *"config/"'; then
+    printf '  FAIL  cmd_ls jq added trailing slash on file (Bug 15):\n%s\n' "$out"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  else
+    printf '  ok    cmd_ls jq dir paths end with /, file paths do not (Bug 15 guard)\n'
   fi
   TESTS_RUN=$((TESTS_RUN + 1))
 }
@@ -2384,6 +2503,9 @@ main() {
   test_stale_progress_seconds_at_least_30
   test_cmd_ls_auto_mounts
   test_cmd_ls_jq_does_not_index_accumulator
+  test_cmd_ls_jq_path_is_full_archive_relative
+  test_cmd_ls_jq_path_unchanged_at_root
+  test_cmd_ls_jq_path_has_trailing_slash_for_dirs
   test_restore_file_via_cp
   test_restore_directory_via_cp
   test_restore_target_dir_no_basename
