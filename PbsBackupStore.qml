@@ -680,7 +680,14 @@ Singleton {
       var cachedMp = listCache[key].mountPoint || ""
       if (cachedMp !== ""
           && root.findMount(snapshot, archive) === -1) {
-        root.addMount(snapshot, archive, cachedMp, "")
+        var groupName2 = root.browseName
+        if (groupName2 === "" && root.groups.length > 0)
+          groupName2 = String(root.groups[0].name)
+        var snapPath2 = String(snapshot)
+        var snapBase2 = snapPath2.substring(snapPath2.lastIndexOf("/") + 1)
+        if (snapBase2 === "") snapBase2 = snapPath2
+        var friendly2 = String(groupName2) + " · " + snapBase2
+        root.addMount(snapshot, archive, cachedMp, friendly2)
       }
       return
     }
@@ -731,10 +738,20 @@ Singleton {
           // multi-mount list (if not already present). mountPoint is
           // a derived view of the last entry's path. addMount only
           // appends; the cache hit branch above already handled the
-          // "promote cached mountPath to mounts" case.
+          // "promote cached mountPath to mounts" case. The friendly
+          // name is "<group> · <snapshot-basename>" so each row in
+          // the per-mount Unmount list is self-explanatory.
           if (record.mountPoint !== ""
               && root.findMount(root.currentSnapshot, root.currentArchive) === -1) {
-            root.addMount(root.currentSnapshot, root.currentArchive, record.mountPoint, "")
+            var groupName = root.browseName
+            if (groupName === "" && root.groups.length > 0)
+              groupName = String(root.groups[0].name)
+            var snapPath = String(root.currentSnapshot)
+            var snapBase = snapPath.substring(snapPath.lastIndexOf("/") + 1)
+            if (snapBase === "") snapBase = snapPath
+            var friendly = String(groupName) + " · " + snapBase
+            root.addMount(root.currentSnapshot, root.currentArchive,
+                          record.mountPoint, friendly)
           }
         }
       }
