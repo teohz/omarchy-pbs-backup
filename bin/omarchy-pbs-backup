@@ -476,27 +476,43 @@ pbs_run() { proxmox-backup-client "$@"; }
 
 PROGRESS_FILE=""
 PROGRESS_KIND=""
-PROGRESS_UNIT=""
-PROGRESS_STARTED=0
-PROGRESS_LAST=0
+ PROGRESS_UNIT=""
+ PROGRESS_STARTED=0
 
 progress_init() {
   PROGRESS_KIND="$1"
   PROGRESS_UNIT="${2:-}"
   PROGRESS_FILE="$STATE_DIR/progress-$GROUP_NAME.json"
   PROGRESS_STARTED="$(date +%s)"
-  PROGRESS_LAST=0
+  # Bug 9 (was M15): no PROGRESS_LAST here. The previous code kept a
+  # shell-local PROGRESS_LAST that the throttle read against, but
+  # parse_progress_stderr runs inside a process-substitution subshell
+  # (pbs_run … 2> >(tee … | parse_progress_stderr)) which inherits
+  # the value once and never propagates updates back. Every throttled
+  # write check inside the subshell compared against a stale value.
+  # The throttle is now keyed off the on-disk progress file's
+  # `updated_epoch` field, which is shared across subshells because
+  # the file persists.
 }
 
 # progress_write <state> <phase> <force> [extra-json]
+# Throttle reads the file's updated_epoch (Bug 9 / was M15) so it
+# works correctly from inside the parse_progress_stderr subshell —
+# the on-disk file is the source of truth, not a shell variable.
 progress_write() {
-  local state="$1" phase="$2" force="$3" extra="${4:-}" now elapsed epoch
+  local state="$1" phase="$2" force="$3" extra="${4:-}" now elapsed epoch file_epoch_ms file_age_ms
   [ -n "$extra" ] || extra='{}'
   now="$(now_ms)"
-  if [ "$force" != "1" ] && [ $((now - PROGRESS_LAST)) -lt "$PROGRESS_INTERVAL_MS" ]; then
-    return 0
+  if [ "$force" != "1" ]; then
+    file_epoch_ms="$(jq -r '.updated_epoch // 0' <"$PROGRESS_FILE" 2>/dev/null)"
+    file_epoch_ms="$(number_or "$file_epoch_ms" 0)"
+    if [ "$file_epoch_ms" -gt 0 ]; then
+      file_age_ms=$((now - file_epoch_ms * 1000))
+      if [ "$file_age_ms" -ge 0 ] && [ "$file_age_ms" -lt "$PROGRESS_INTERVAL_MS" ]; then
+        return 0
+      fi
+    fi
   fi
-  PROGRESS_LAST="$now"
   epoch="$(date +%s)"
   elapsed=$((epoch - PROGRESS_STARTED))
 

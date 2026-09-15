@@ -272,6 +272,104 @@ JSON
   TESTS_RUN=$((TESTS_RUN + 1))
 }
 
+test_progress_write_throttle_uses_file_updated_epoch() {
+  # Bug 9 (was M15): progress_write's throttle used to read a
+  # shell-local PROGRESS_LAST variable. parse_progress_stderr runs
+  # inside a process-substitution subshell (`pbs_run … 2> >(tee …
+  # | parse_progress_stderr)`), which inherits the variable once
+  # and never propagates updates back. After the first throttle
+  # bypass, every subsequent check inside the subshell compared
+  # against a stale value. The fix reads the on-disk progress
+  # file's updated_epoch field instead — the file is the source of
+  # truth and persists across subshell boundaries.
+  #
+  # Source-grep guard: pin the absence of PROGRESS_LAST (used in
+  # assignments / variable refs, not comments) and the presence of
+  # the file-based throttle check.
+  local pl_hits
+  pl_hits="$(grep -nE 'PROGRESS_LAST=|\$\{?PROGRESS_LAST\}?' bin/omarchy-pbs-backup 2>/dev/null || true)"
+  if [ -n "$pl_hits" ]; then
+    printf '  FAIL  PROGRESS_LAST still present (Bug 9 / M15 regression):\n%s\n' "$pl_hits"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    TESTS_RUN=$((TESTS_RUN + 1))
+    return 0
+  fi
+  if grep -qE "file_epoch_ms=.*jq -r '\.updated_epoch" bin/omarchy-pbs-backup; then
+    printf '  ok    progress_write throttle reads updated_epoch from file (Bug 9 / M15)\n'
+  else
+    printf '  FAIL  progress_write throttle lost file-based check (Bug 9 / M15 regression)\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
+test_progress_write_throttle_skips_recent_writes() {
+  # Behavioural: with a freshly written progress file (recent
+  # updated_epoch), a subsequent throttled call skips the write.
+  # With a stale file (old updated_epoch), it writes. We can't run
+  # cmd_backup end-to-end (needs PBS), so we exercise the throttle
+  # directly by sourcing the script and calling progress_write.
+  #
+  # PROGRESS_INTERVAL_MS is set high (5000) to make the test robust
+  # against bash startup latency: any file written within the last
+  # 5 seconds counts as "fresh".
+  setup_isolated_home
+  mkdir -p -- "$XDG_CONFIG_HOME/omarchy-pbs-backup"
+  cp "$FIXTURES/config-valid.json" "$XDG_CONFIG_HOME/omarchy-pbs-backup/config.json"
+  mkdir -p -- "$XDG_STATE_HOME/omarchy-pbs-backup"
+  local progress_file="$XDG_STATE_HOME/omarchy-pbs-backup/progress-external-drive.json"
+
+  local now; now="$(date +%s)"
+
+  # Round 1: write a progress file with updated_epoch = now. A
+  # subsequent throttled progress_write should skip.
+  cat > "$progress_file" <<JSON
+{"state":"running","phase":"backup","updated_epoch":$now,"percent":0.5}
+JSON
+  (
+    source "$SCRIPT" >/dev/null 2>&1 || true
+    PROGRESS_FILE="$progress_file"
+    PROGRESS_INTERVAL_MS=5000
+    PROGRESS_KIND=backup
+    PROGRESS_UNIT=""
+    PROGRESS_STARTED="$now"
+    progress_write running backup 0 '{"percent": 0.6}'
+  )
+  local percent_after
+  percent_after="$(jq -r '.percent' <"$progress_file" 2>/dev/null)"
+  if [ "$percent_after" = "0.5" ]; then
+    printf '  ok    progress_write throttle skips recent file write (Bug 9 / M15)\n'
+  else
+    printf '  FAIL  throttle did not skip fresh file (percent=%s, want 0.5)\n' "$percent_after"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+
+  # Round 2: write a progress file with updated_epoch far in the
+  # past. A throttled progress_write should write through.
+  cat > "$progress_file" <<JSON
+{"state":"running","phase":"backup","updated_epoch":0,"percent":0.5}
+JSON
+  (
+    source "$SCRIPT" >/dev/null 2>&1 || true
+    PROGRESS_FILE="$progress_file"
+    PROGRESS_INTERVAL_MS=5000
+    PROGRESS_KIND=backup
+    PROGRESS_UNIT=""
+    PROGRESS_STARTED="$now"
+    progress_write running backup 0 '{"percent": 0.7}'
+  )
+  percent_after="$(jq -r '.percent' <"$progress_file" 2>/dev/null)"
+  if [ "$percent_after" = "0.7" ]; then
+    printf '  ok    progress_write throttle passes stale file (Bug 9 / M15)\n'
+  else
+    printf '  FAIL  throttle blocked stale file write (percent=%s, want 0.7)\n' "$percent_after"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  rm -rf -- "$tmp"
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
 test_state_dirs_outside_plugin_dir() {
   # The plugin code lives at PLUGIN_DIR (set inside the script as the parent
   # of bin/). Config and state must NOT live under PLUGIN_DIR, otherwise
@@ -2202,6 +2300,8 @@ main() {
   test_status_pre_extracts_group_table
   test_status_multi_group_carries_display_name_and_schedule
   test_cmd_install_no_schedule_returns_nonzero
+  test_progress_write_throttle_uses_file_updated_epoch
+  test_progress_write_throttle_skips_recent_writes
   test_state_dirs_outside_plugin_dir
   test_backup_no_json_flag
   test_pbs_group_helper
