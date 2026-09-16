@@ -401,9 +401,13 @@ Singleton {
   // Mount the given snapshot+archive and open it in the file manager.
   // If the snapshot is already mounted (findMount returns >= 0),
   // just opens that mount — no-op for the mount step. Otherwise
-  // triggers a remount via listPath; lsProc populates the new entry
-  // (its stdout handler calls addMount); mountOpenTimer then opens
-  // the file manager once the entry is in the list.
+  // triggers a remount via listPath. The actual open happens inside
+  // the cache-hit branch of listPath (synchronous) or inside
+  // lsProc.onStreamFinished (asynchronous), whichever fires first
+  // for this snapshot+archive. That eliminates the previous
+  // mountOpenTimer, whose 5 s budget silently expired on cold PBS
+  // connections (mount_snapshot can take up to 30 s) and left the
+  // user with a successful mount but no file manager open.
   //
   // The user's spec: clicking Mount on the SAME snapshot is a no-op
   // for mounting — just opens the FM. Clicking on a DIFFERENT
@@ -424,49 +428,32 @@ Singleton {
     pendingMountSnapshot = s
     pendingMountArchive = a
     listPath(s, a, "/")
-    // lsProc may have populated synchronously (cache hit). Check
-    // before starting the Timer.
-    idx = findMount(s, a)
-    if (idx !== -1) {
-      openMountWithNotify(mounts[idx].mountPath)
-      return
-    }
-    mountOpenTimer.start()
+    // lsProc may have populated synchronously (cache hit). The
+    // cache-hit branch of listPath fires openMountWithNotify itself
+    // when the mount is for the pending snapshot, so we don't need
+    // a separate check here. The asynchronous path is handled inside
+    // lsProc.stdout.onStreamFinished.
   }
-  // The snapshot+archive mountSnapshot last queued to open, so the
-  // mountOpenTimer knows which entry to wait for. lsProc's handler
-  // also writes to these when it adds a new entry asynchronously.
+  // The snapshot+archive mountSnapshot last queued to open. Cleared
+  // by the cache-hit branch of listPath and by lsProc.onStreamFinished
+  // once addMount + openMountWithNotify have fired for this entry.
   property string pendingMountSnapshot: ""
   property string pendingMountArchive: ""
 
-  // Polls for lsProc to populate the pending mount entry, then opens
-  // the file manager. Bounded by mountOpenDeadline so we don't spin
-  // forever if the mount fails (lsProc already set listError in that
-  // case, so the user sees the failure inline).
-  Timer {
-    id: mountOpenTimer
-    property int remaining: 50
-    interval: 100
-    repeat: true
-    running: false
-    onTriggered: {
-      var s = root.pendingMountSnapshot
-      var a = root.pendingMountArchive
-      var idx = root.findMount(s, a)
-      if (idx !== -1 && root.mounts[idx].mountPath !== "") {
-        running = false
-        root.openMountWithNotify(root.mounts[idx].mountPath)
-        root.pendingMountSnapshot = ""
-        root.pendingMountArchive = ""
-        return
-      }
-      remaining = remaining - 1
-      if (remaining <= 0) {
-        running = false
-        root.pendingMountSnapshot = ""
-        root.pendingMountArchive = ""
-      }
-    }
+  // Opens the file manager for `snapshot`/`archive` if it matches the
+  // pending mount request. Called from both the cache-hit branch of
+  // listPath (synchronous addMount) and lsProc.onStreamFinished
+  // (asynchronous addMount). Idempotent: if pendingSnapshot doesn't
+  // match, leaves pending set so a later lsProc for the pending
+  // snapshot can still fire the open.
+  function openPendingMountIfMatch(snapshot, archive) {
+    if (snapshot !== pendingMountSnapshot) return
+    if (archive !== pendingMountArchive) return
+    var idx = findMount(snapshot, archive)
+    if (idx === -1 || mounts[idx].mountPath === "") return
+    openMountWithNotify(mounts[idx].mountPath)
+    pendingMountSnapshot = ""
+    pendingMountArchive = ""
   }
 
   // Unmount just one snapshot's mount (per the new list UI). Optimistically
@@ -688,6 +675,11 @@ Singleton {
         var friendly2 = String(groupName2) + " · " + snapBase2
         root.addMount(snapshot, archive, cachedMp, friendly2)
       }
+      // Bug 16: cache-hit fires synchronously, so this is the earliest
+      // chance to open the FM for a pending mount. lsProc won't fire
+      // for a cache hit, so without this the cache-hit branch would
+      // never open the FM.
+      root.openPendingMountIfMatch(snapshot, archive)
       return
     }
 
@@ -752,6 +744,12 @@ Singleton {
             root.addMount(root.currentSnapshot, root.currentArchive,
                           record.mountPoint, friendly)
           }
+          // Bug 16: the new mount is now in mounts. If it matches the
+          // pending mount request, fire openMountWithNotify now —
+          // replaces the old mountOpenTimer polling loop, which had a
+          // 5 s budget that silently expired on cold PBS connections
+          // (mount_snapshot can take up to 30 s).
+          root.openPendingMountIfMatch(root.currentSnapshot, root.currentArchive)
         }
       }
     }

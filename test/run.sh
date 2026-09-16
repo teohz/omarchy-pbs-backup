@@ -397,6 +397,69 @@ test_panel_bar_icon_color_uses_foreground() {
   TESTS_RUN=$((TESTS_RUN + 1))
 }
 
+# Bug 16: mountOpenTimer polled for the freshly-added mount for 5 s
+# (interval: 100, remaining: 50). On cold PBS connections
+# mount_snapshot can take up to 30 s, so the timer silently expired
+# and the user got the Unmount button without the file manager ever
+# opening. The fix moves openMountWithNotify out of the timer and
+# fires it directly from the two places addMount happens: the
+# cache-hit branch of listPath (synchronous) and
+# lsProc.stdout.onStreamFinished (asynchronous). The timer is gone.
+#
+# Two structural guards pin the new shape:
+# 1. No Timer with id mountOpenTimer exists. A Timer block with that
+#    id anywhere in PbsBackupStore.qml re-introduces the bug.
+# 2. openPendingMountIfMatch is invoked from both addMount sites —
+#    listPath's cache-hit branch and lsProc.stdout.onStreamFinished.
+#    Missing either call re-introduces the failure mode for that path.
+test_pbsbackupstore_open_pending_mount_no_timer() {
+  # Guard 1: no Timer with id mountOpenTimer.
+  if awk '
+      /id:[[:space:]]+mountOpenTimer\b/ { found=1 }
+      END { exit !found }
+    ' PbsBackupStore.qml; then
+    printf '  FAIL  mountOpenTimer still exists in PbsBackupStore.qml (Bug 16 regression)\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  else
+    :
+  fi
+
+  # Guard 2: openPendingMountIfMatch defined.
+  if ! grep -qE 'function openPendingMountIfMatch' PbsBackupStore.qml; then
+    printf '  FAIL  openPendingMountIfMatch not defined in PbsBackupStore.qml (Bug 16 regression)\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+
+  # Guard 3: openPendingMountIfMatch called at least twice — once
+  # from the cache-hit branch of listPath and once from
+  # lsProc.stdout.onStreamFinished. Two call sites are needed
+  # because lsProc never fires for a cache hit; without the
+  # listPath call, a cache-hit mount would never open the FM.
+  local call_count
+  call_count="$(grep -cE 'root\.openPendingMountIfMatch\(' PbsBackupStore.qml)"
+  if [ "$call_count" -lt 2 ]; then
+    printf '  FAIL  openPendingMountIfMatch called %d times (Bug 16 wants >=2)\n' "$call_count"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+
+  # Guard 4: mountSnapshot must NOT start any Timer (the only valid
+  # callers are addMount / openPendingMountIfMatch / listPath). A
+  # Timer re-introduces the 5 s silent failure mode.
+  if awk '
+      /^  function mountSnapshot\b/ { in_block=1; next }
+      in_block && /^  \}[[:space:]]*$/ { in_block=0; next }
+      in_block { print }
+    ' PbsBackupStore.qml | grep -qE 'Timer|\.start\(\)'; then
+    printf '  FAIL  mountSnapshot still references a Timer (Bug 16 regression)\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+
+  if [ "$TESTS_FAILED" -eq 0 ]; then
+    printf '  ok    pending mount opens via openPendingMountIfMatch, no Timer (Bug 16 guard)\n'
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
 test_state_dirs_outside_plugin_dir() {
   # The plugin code lives at PLUGIN_DIR (set inside the script as the parent
   # of bin/). Config and state must NOT live under PLUGIN_DIR, otherwise
@@ -2449,6 +2512,7 @@ main() {
   test_progress_write_throttle_uses_file_updated_epoch
   test_progress_write_throttle_skips_recent_writes
   test_panel_bar_icon_color_uses_foreground
+  test_pbsbackupstore_open_pending_mount_no_timer
   test_state_dirs_outside_plugin_dir
   test_backup_no_json_flag
   test_pbs_group_helper
