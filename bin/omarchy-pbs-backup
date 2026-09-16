@@ -1135,10 +1135,28 @@ cmd_restore() {
       return 0
     fi
     if [ -d "$source" ]; then
-      # Directory restore: nest the directory under dest so the user
-      # sees e.g. ~/Restored/<ts>/restic/{contents,...}.
-      cp -a "$source" "$dest/" \
-        || { jq -nc '{ok:false, error:"cp failed"}'; return 0; }
+      # Directory restore (Bug 20): use cp --parents from the mount
+      # root so the directory's CONTENTS land directly under dest/,
+      # matching the file-restore behaviour. The previous
+      # implementation did `cp -a "$source" "$dest/"` which copied
+      # the directory itself (and its name — a snapshot-derived
+      # basename like `host-external-disk-2026-09-15T22:56:03Z`) as
+      # a subfolder of dest/. With --parents and stripped="" (path was
+      # the archive root "/" before the strip), we restore every
+      # entry of the mount as a direct child of dest.
+      if [ -z "$stripped" ]; then
+        # Archive root: copy the contents of the mount under dest,
+        # skipping the `.` and `..` pseudo-entries the FUSE may emit.
+        (cd "${OPT_COPY_SOURCE%/}" && find . -mindepth 1 -maxdepth 1 \
+           ! -name . ! -name .. -print0 \
+         | xargs -0 -I{} cp --parents -a {} "$dest/") \
+          || { jq -nc '{ok:false, error:"cp failed"}'; return 0; }
+      else
+        # Nested directory: cd into the mount root and use --parents
+        # so dest/restic/data lands at dest/restic/data.
+        (cd "${OPT_COPY_SOURCE%/}" && cp --parents -a "$stripped" "$dest/") \
+          || { jq -nc '{ok:false, error:"cp failed"}'; return 0; }
+      fi
     else
       # File restore: --parents preserves the archive-relative path,
       # so ~/Restored/<ts>/restic/config lands at dest/restic/config.

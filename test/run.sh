@@ -1727,6 +1727,65 @@ test_pbsbackupstore_mountPoint_uses_current_snapshot() {
   TESTS_RUN=$((TESTS_RUN + 1))
 }
 
+# Bug 20: the directory-restore branch in cmd_restore used to do
+# `cp -a "$source" "$dest/"`, copying the directory itself (named
+# after a snapshot-derived basename like
+# `host-external-disk-2026-09-15T22:56:03Z`) as a subfolder of
+# dest/. That was inconsistent with the file-restore branch, which
+# used `cp --parents -a` to preserve the archive-relative path
+# (e.g. `dest/restic/data`, not `dest/.../restic/data`).
+#
+# The fix uses the same --parents shape: at the archive root
+# (stripped=="") it copies the mount's direct entries under dest/
+# using `find ... ! . ! .. -print0 | xargs -0 cp --parents`. At
+# nested paths it cd's to the mount root and uses cp --parents.
+#
+# Structural guard: the dir-branch must NOT contain the old
+# `cp -a "$source" "$dest/"` line verbatim, and the function must
+# reference cp --parents in the dir branch (not just the file
+# branch). Searching for both `cp -a "$source"` AND `cp --parents`
+# in the function body and asserting the file-branch pattern does
+# not leak into the dir branch is too brittle; instead we check
+# the directory branch uses cp --parents.
+test_cmd_restore_dir_branch_uses_cp_parents() {
+  # The dir branch is the `if [ -d "$source" ]` block inside
+  # cmd_restore's fast path. We extract lines from that `if` to
+  # its closing `fi` and check that cp --parents is referenced.
+  local dir_branch
+  dir_branch="$(awk '
+      /^cmd_restore\(\)/ { in_func=1; next }
+      in_func && /^}/ { in_func=0; next }
+      in_func && /if \[ -d "\$source" \]; then/ { in_block=1; next }
+      in_block && /^[[:space:]]*fi[[:space:]]*$/ { in_block=0; print "###END###"; next }
+      in_block { print }
+    ' "$SCRIPT")"
+
+  if [ -z "$dir_branch" ] || ! printf '%s' "$dir_branch" | grep -q '###END###'; then
+    printf '  FAIL  could not extract dir branch from cmd_restore\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    TESTS_RUN=$((TESTS_RUN + 1))
+    return
+  fi
+
+  # The old shape was `cp -a "$source" "$dest/"` — should be gone
+  # (excluding the comment that documents the old behaviour).
+  if printf '%s' "$dir_branch" | grep -vE '^[[:space:]]*#' | grep -qE 'cp -a "\$source" "\$dest/"'; then
+    printf '  FAIL  cmd_restore dir branch still uses cp -a $source $dest/ (Bug 20 regression)\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+
+  # The new shape uses cp --parents in the dir branch.
+  if ! printf '%s' "$dir_branch" | grep -q 'cp --parents'; then
+    printf '  FAIL  cmd_restore dir branch does not use cp --parents (Bug 20 regression)\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+
+  if [ "$TESTS_FAILED" -eq 0 ]; then
+    printf '  ok    cmd_restore dir branch uses cp --parents (Bug 20 guard)\n'
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
 test_restore_falls_back_to_pbs() {
   # Bug 17 reversed the previous behaviour: without --copy-source AND
   # without --allow-full-archive, cmd_restore now refuses to extract
@@ -2701,6 +2760,7 @@ main() {
   test_panel_restore_rows_require_mountpoint
   test_cmd_ls_strips_trailing_slash_from_path_for_jq
   test_pbsbackupstore_mountPoint_uses_current_snapshot
+  test_cmd_restore_dir_branch_uses_cp_parents
   test_state_dirs_outside_plugin_dir
   test_backup_no_json_flag
   test_pbs_group_helper
