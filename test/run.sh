@@ -1636,6 +1636,58 @@ test_cmd_ls_jq_path_has_trailing_slash_for_dirs() {
   TESTS_RUN=$((TESTS_RUN + 1))
 }
 
+# Bug 18: directory entries carry a trailing slash in their JSON
+# `path` field (the Bug 15 contract — distinguishes dirs from files).
+# The QML passes that exact string back into --path on the next
+# click. Without stripping the trailing slash from --path before
+# passing it to jq, each navigation accumulates another slash and
+# `goUp` enters an oscillate-only loop.
+#
+# The stripping lives on the bash side (before the jq invocation),
+# not in the jq filter. We assert that the jq invocation in
+# cmd_ls does NOT pass `--arg p "$path"` directly (which would
+# preserve the trailing slash), but instead uses a stripped
+# variant — typically `p_for_jq="${path%/}"` and
+# `--arg p "$p_for_jq"`.
+test_cmd_ls_strips_trailing_slash_from_path_for_jq() {
+  # The jq invocation that produces the listing JSON must not pass
+  # the raw `$path` as `$p`. Any pattern that strips the trailing
+  # slash before passing is acceptable (`${path%/}`,
+  # `$(echo "$path" | sed 's#/$##')`, etc. — though only the
+  # parameter-expansion form is in the script).
+  #
+  # There are two `--arg p` invocations in cmd_ls (one for the error
+  # path that returns "path does not exist in snapshot" and one for
+  # the listing JSON). The error path uses raw `$path` (correct — the
+  # user wants to see exactly what they typed). The listing path must
+  # use a stripped variant.
+  local listing_jq
+  listing_jq="$(awk '
+      /^cmd_ls\(\)/ { in_func=1; next }
+      in_func && /^}/ { in_func=0; next }
+      in_func && /split\(/ { found_split=1; next }
+      found_split && /--arg p / { print; exit }
+    ' "$SCRIPT")"
+
+  if [ -z "$listing_jq" ]; then
+    printf '  FAIL  could not find the listing-JSON jq invocation in cmd_ls\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    TESTS_RUN=$((TESTS_RUN + 1))
+    return
+  fi
+
+  if printf '%s' "$listing_jq" | grep -qE -- '--arg p[[:space:]]+"\$path"[[:space:]]*\\?$|--arg p[[:space:]]+"\$path"[[:space:]]'; then
+    printf '  FAIL  cmd_ls listing jq passes raw $path (Bug 18 regression)\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  elif ! printf '%s' "$listing_jq" | grep -qE -- '--arg p[[:space:]]+"\$'; then
+    printf '  FAIL  cmd_ls listing jq has no --arg p (Bug 18 regression)\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  else
+    printf '  ok    cmd_ls listing jq strips trailing slash from --path (Bug 18 guard)\n'
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
 test_restore_falls_back_to_pbs() {
   # Bug 17 reversed the previous behaviour: without --copy-source AND
   # without --allow-full-archive, cmd_restore now refuses to extract
@@ -2608,6 +2660,7 @@ main() {
   test_panel_bar_icon_color_uses_foreground
   test_pbsbackupstore_open_pending_mount_no_timer
   test_panel_restore_rows_require_mountpoint
+  test_cmd_ls_strips_trailing_slash_from_path_for_jq
   test_state_dirs_outside_plugin_dir
   test_backup_no_json_flag
   test_pbs_group_helper

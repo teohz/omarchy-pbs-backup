@@ -1042,9 +1042,19 @@ cmd_ls() {
   # cmd_restore falls through to `pbs restore` which extracts the entire
   # archive (Bug 15). At --path "/" the prefix is empty so root entries
   # stay as just the basename (no regression at the top level).
+  #
+  # Bug 18: directory entries carry a trailing slash in their JSON
+  # `path` field (so QML navigation knows which kind of entry it is).
+  # The QML passes that exact string back into --path on the next click.
+  # Without stripping the trailing slash before computing `$p`, each
+  # navigation accumulates another slash (`"restic//data//"` etc.) and
+  # `goUp` enters an oscillate-only loop. Normalise before passing to
+  # jq — the trailing slash is purely a marker in the JSON output and
+  # has no meaning in a target directory argument.
+  local p_for_jq="${path%/}"
   local entries_json entries_count truncated
   entries_json="$(cd "$target" && find . -mindepth 1 -maxdepth 1 -printf '%y\0%f\0%s\0' \
-    | jq -Rs --arg p "$path" --argjson cap "$LS_ENTRY_CAP" '
+    | jq -Rs --arg p "$p_for_jq" --argjson cap "$LS_ENTRY_CAP" '
         # Bind the split rows once and index that — don'\''t try to index
         # the accumulator by a numeric key (.[$i] errors on `{}` with
         # "Cannot index object with number (0)").
