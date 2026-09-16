@@ -276,6 +276,7 @@ parse_options() {
   OPT_TARGET=""; OPT_PATTERN=""; OPT_DRY_RUN=0; OPT_JSON=0
   OPT_ALL=0
   OPT_COPY_SOURCE=""
+  OPT_ALLOW_FULL_ARCHIVE=0
   POSITIONAL=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -286,6 +287,7 @@ parse_options() {
       --target) OPT_TARGET="${2:-}"; shift 2 || shift ;;
       --pattern) OPT_PATTERN="${2:-}"; shift 2 || shift ;;
       --copy-source) OPT_COPY_SOURCE="${2:-}"; shift 2 || shift ;;
+      --allow-full-archive) OPT_ALLOW_FULL_ARCHIVE=1; shift ;;
       --dry-run) OPT_DRY_RUN=1; shift ;;
       --json) OPT_JSON=1; shift ;;
       --all) OPT_ALL=1; shift ;;
@@ -1140,9 +1142,20 @@ cmd_restore() {
     return 0
   fi
 
-  # Slow path: no mount to copy from. Run the PBS restore (which will
-  # always extract the entire archive — the QML uses --copy-source so
-  # the fast path is the common case).
+  # Slow path: no mount to copy from. The QML never sets this flag,
+  # so reaching this point means a caller (terminal, script, future
+  # restore-from-history feature) explicitly asked for a full-archive
+  # restore. We refuse unless --allow-full-archive is set: silently
+  # extracting an entire archive because the caller didn't pass
+  # --copy-source is the worst possible failure mode (Bug 17) — the
+  # user picks one file and gets everything. The fast path above is
+  # the common case; the slow path is here only for tools.
+  if [ "${OPT_ALLOW_FULL_ARCHIVE:-0}" != "1" ]; then
+    jq -nc --arg p "$OPT_PATH" \
+      '{ok:false, error:"no FUSE mount available; refusing to extract the entire archive. Pass --copy-source for a single file/dir, or --allow-full-archive to extract everything."}'
+    return 0
+  fi
+
   pbs_context
   local -a restore_args
   restore_args=(restore "$OPT_SNAPSHOT" "$OPT_ARCHIVE" "$dest")
@@ -1668,8 +1681,9 @@ omarchy-pbs-backup $VERSION
   mount --dest <group> --snapshot <id> --archive <name>
   unmount --dest <group>
   ls --dest <group> --snapshot <id> --archive <name> --path </abs> --json
-  restore --dest <group> --snapshot <id> --archive <name> [--target <dir>] [--pattern <glob>] [--copy-source <mount>]
-  --copy-source MOUNT      copy from a local FUSE mount (selected file/dir only); falls back to PBS restore
+  restore --dest <group> --snapshot <id> --archive <name> [--target <dir>] [--pattern <glob>] [--copy-source <mount>] [--allow-full-archive]
+  --copy-source MOUNT        copy from a local FUSE mount (selected file/dir only); refuses without --allow-full-archive if missing
+  --allow-full-archive       explicitly opt in to extracting the entire .pxar archive (Bug 17: required because the QML never passes this)
   install                             (re)write and enable the systemd units
   config create                       write a starter configuration
   log [--dest <group>]                path of the most recent log file

@@ -576,7 +576,16 @@ FocusScope {
 
     MenuRow {
       width: parent.width
-      visible: root.selected !== null && !PbsBackupStore.restoreBusy
+      // Bug 17: also require the FUSE mount to still be alive. The
+      // QML keeps a local `root.selected` even after the user clicks
+      // Unmount on the underlying mount, so without this guard the
+      // Restore menu row stays clickable and cmd_restore falls through
+      // to its slow path — which without --pattern extracts the
+      // entire archive. Hiding the row makes that dangerous path
+      // unreachable from the UI.
+      visible: root.selected !== null
+               && PbsBackupStore.mountPoint !== ""
+               && !PbsBackupStore.restoreBusy
       label: root.selected ? "Restore \u201C" + String(root.selected.name) + "\u201D" : ""
       foreground: root.foreground
       fontFamily: root.fontFamily
@@ -589,7 +598,10 @@ FocusScope {
 
     MenuRow {
       width: parent.width
-      visible: PbsBackupStore.currentPath !== "" && !PbsBackupStore.restoreBusy
+      // Bug 17: same guard for the folder-restore row.
+      visible: PbsBackupStore.currentPath !== ""
+               && PbsBackupStore.mountPoint !== ""
+               && !PbsBackupStore.restoreBusy
       label: "Restore this folder (" + root.currentFolderName + ")"
       foreground: root.foreground
       fontFamily: root.fontFamily

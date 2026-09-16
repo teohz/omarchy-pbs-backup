@@ -460,6 +460,63 @@ test_pbsbackupstore_open_pending_mount_no_timer() {
   TESTS_RUN=$((TESTS_RUN + 1))
 }
 
+# Bug 17: the two Restore menu rows in RestoreBrowser.qml (Restore
+# "<name>" and Restore this folder) are visible whenever the QML has a
+# local `root.selected` or `PbsBackupStore.currentPath !== ""`. The
+# QML keeps `root.selected` after the user clicks Unmount on the
+# underlying mount, so without an additional guard the Restore row
+# stays clickable. The fast-path `cp` then has no --copy-source to
+# work with, cmd_restore falls through to its slow path, and the
+# entire archive gets extracted into ~/Restored. Adding a
+# `mountPoint !== ""` guard to both rows makes the dangerous click
+# unreachable from the UI.
+test_panel_restore_rows_require_mountpoint() {
+  # Bug 17: the two Restore menu rows in RestoreBrowser.qml (Restore
+  # "<name>" and Restore this folder) must guard their `visible`
+  # binding on `mountPoint !== ""`. Without this guard the row stays
+  # clickable after the user clicks Unmount on the underlying mount;
+  # clicking Restore then runs cmd_restore without --copy-source and
+  # the slow path extracts the entire archive.
+  #
+  # Locate both MenuRows that contain "Restore" in their label (no other
+  # row uses "Restore", so we don't get false positives). For each, the
+  # `visible:` line must mention mountPoint.
+  local restore_rows_with_guard
+  restore_rows_with_guard="$(grep -nE 'MenuRow[[:space:]]*\{' RestoreBrowser.qml | wc -l)"
+
+  # The simplest correct guard: each Restore row's visible binding is
+  # on a line within ~6 lines after the row's `label:` mentions Restore.
+  local rows_total rows_guarded
+  rows_total="$(grep -cE '^      label:.*Restore' RestoreBrowser.qml)"
+  rows_guarded=0
+  while IFS= read -r line; do
+    # `line` is the line number of the label. The visible binding sits
+    # ABOVE the label (the previous few lines). QML wraps long bindings
+    # across multiple lines so we grep backwards and forwards over a
+    # window that comfortably covers a 3-line wrap.
+    local context
+    context="$(sed -n "$((line-5)),$((line+3))p" RestoreBrowser.qml)"
+    if printf '%s\n' "$context" | grep -qE 'mountPoint[[:space:]]*!==[[:space:]]*""'; then
+      rows_guarded=$((rows_guarded + 1))
+    fi
+  done < <(grep -nE '^      label:.*Restore' RestoreBrowser.qml | cut -d: -f1)
+
+  if [ "$rows_total" -lt 2 ]; then
+    printf '  FAIL  expected at least 2 Restore menu rows in RestoreBrowser.qml, found %d\n' "$rows_total"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  if [ "$rows_guarded" -lt 2 ]; then
+    printf '  FAIL  only %d/%d Restore rows guard on mountPoint !== "" (Bug 17 regression)\n' \
+      "$rows_guarded" "$rows_total"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+
+  if [ "$TESTS_FAILED" -eq 0 ]; then
+    printf '  ok    both Restore menu rows guard on mountPoint !== "" (Bug 17)\n'
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
 test_state_dirs_outside_plugin_dir() {
   # The plugin code lives at PLUGIN_DIR (set inside the script as the parent
   # of bin/). Config and state must NOT live under PLUGIN_DIR, otherwise
@@ -1580,14 +1637,15 @@ test_cmd_ls_jq_path_has_trailing_slash_for_dirs() {
 }
 
 test_restore_falls_back_to_pbs() {
+  # Bug 17 reversed the previous behaviour: without --copy-source AND
+  # without --allow-full-archive, cmd_restore now refuses to extract
+  # the entire archive. The QML never passes --allow-full-archive,
+  # so the dangerous slow path becomes unreachable from the UI.
+  # This test asserts the refusal, not the (old) silent fall-through.
   setup_isolated_home
   mkdir -p -- "$XDG_CONFIG_HOME/omarchy-pbs-backup"
   cp "$FIXTURES/config-valid.json" "$XDG_CONFIG_HOME/omarchy-pbs-backup/config.json"
 
-  # No --copy-source, and no actual PBS server: the restore must still
-  # go through the PBS code path (proxmox-backup-client restore ...).
-  # We assert the script tries to run the PBS command and fails with
-  # the expected "no secret" error, NOT with a cp-related error.
   local out code
   out="$(HOME="$tmp" "$SCRIPT" restore \
       --dest external-drive \
@@ -1596,10 +1654,46 @@ test_restore_falls_back_to_pbs() {
       --path "restic/config" \
       --json 2>&1)"
   code=$?
-  if printf '%s' "$out" | grep -qE 'cp:|no secret|no repository|repository'; then
-    printf '  ok    restore without --copy-source falls back to PBS (got expected error)\n'
+  if printf '%s' "$out" | grep -q 'refusing to extract the entire archive'; then
+    printf '  ok    restore without --copy-source refuses (Bug 17 guard)\n'
   else
-    printf '  FAIL  unexpected fallback output: code=%d out=%s\n' "$code" "$out"
+    printf '  FAIL  expected refusal, got: code=%d out=%s\n' "$code" "$out"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  rm -rf -- "$tmp"
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
+test_restore_explicit_allow_full_archive_passes_through() {
+  # Bug 17 introduced --allow-full-archive as an opt-in for the slow
+  # path. With the flag set, cmd_restore must reach the PBS code path
+  # (proxmox-backup-client restore ...) just like the old behaviour.
+  # We assert that by checking the failure mode: with no PBS server
+  # available, the script tries to call proxmox-backup-client and
+  # fails with a PBS-related error, NOT with the new refusal message.
+  setup_isolated_home
+  mkdir -p -- "$XDG_CONFIG_HOME/omarchy-pbs-backup"
+  cp "$FIXTURES/config-valid.json" "$XDG_CONFIG_HOME/omarchy-pbs-backup/config.json"
+
+  local out code
+  out="$(HOME="$tmp" "$SCRIPT" restore \
+      --dest external-drive \
+      --snapshot host/external-drive/2026-09-09T15:00:00Z \
+      --archive external-drive.ppxar.didx \
+      --path "restic/config" \
+      --allow-full-archive \
+      --json 2>&1)"
+  code=$?
+  if printf '%s' "$out" | grep -q 'refusing to extract the entire archive'; then
+    printf '  FAIL  --allow-full-archive still refused: %s\n' "$out"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  elif ! printf '%s' "$out" | grep -q 'cp:'; then
+    # cp-related errors would mean the fast path ran. We expect the
+    # PBS code path to run, which fails because there is no PBS server
+    # in the test environment — but NOT with a 'cp' error.
+    printf '  ok    --allow-full-archive passes through to PBS (got: %s)\n' "$out"
+  else
+    printf '  FAIL  --allow-full-archive ran cp fast path: %s\n' "$out"
     TESTS_FAILED=$((TESTS_FAILED + 1))
   fi
   rm -rf -- "$tmp"
@@ -2513,6 +2607,7 @@ main() {
   test_progress_write_throttle_skips_recent_writes
   test_panel_bar_icon_color_uses_foreground
   test_pbsbackupstore_open_pending_mount_no_timer
+  test_panel_restore_rows_require_mountpoint
   test_state_dirs_outside_plugin_dir
   test_backup_no_json_flag
   test_pbs_group_helper
@@ -2574,6 +2669,7 @@ main() {
   test_restore_directory_via_cp
   test_restore_target_dir_no_basename
   test_restore_falls_back_to_pbs
+  test_restore_explicit_allow_full_archive_passes_through
   test_backup_requires_dest_or_all
   test_backup_help_lists_all_flag
   test_backup_all_iterates_and_dry_run
