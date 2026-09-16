@@ -1688,6 +1688,45 @@ test_cmd_ls_strips_trailing_slash_from_path_for_jq() {
   TESTS_RUN=$((TESTS_RUN + 1))
 }
 
+# Bug 19: `mountPoint` must resolve to the entry matching
+# (currentSnapshot, currentArchive), not the LAST entry in the
+# `mounts` array. The latter was wrong when the user had multiple
+# mounts: switching snapshots and switching back left
+# `mounts[last]` pointing at whichever snapshot happened to be
+# last added, while the user was browsing a different one.
+#
+# Structural test: the `mountPoint` block must NOT use
+# `mounts[mounts.length - 1]` (the old shape) — it must use
+# `findMount(currentSnapshot, currentArchive)`.
+test_pbsbackupstore_mountPoint_uses_current_snapshot() {
+  local block
+  block="$(awk '
+      /readonly property string mountPoint:/ { in_block=1; next }
+      in_block && /^[[:space:]]*\}[[:space:]]*$/ { in_block=0; exit }
+      in_block { print }
+    ' PbsBackupStore.qml)"
+
+  if [ -z "$block" ]; then
+    printf '  FAIL  could not extract mountPoint block from PbsBackupStore.qml\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    TESTS_RUN=$((TESTS_RUN + 1))
+    return
+  fi
+
+  if printf '%s' "$block" | grep -q 'mounts\[mounts\.length - 1\]\|mounts\[length - 1\]'; then
+    printf '  FAIL  mountPoint still indexes mounts[length-1] (Bug 19 regression)\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  if ! printf '%s' "$block" | grep -q 'findMount(currentSnapshot, currentArchive)'; then
+    printf '  FAIL  mountPoint does not look up by (currentSnapshot, currentArchive) (Bug 19 regression)\n'
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  if [ "$TESTS_FAILED" -eq 0 ]; then
+    printf '  ok    mountPoint uses findMount(currentSnapshot, currentArchive) (Bug 19 guard)\n'
+  fi
+  TESTS_RUN=$((TESTS_RUN + 1))
+}
+
 test_restore_falls_back_to_pbs() {
   # Bug 17 reversed the previous behaviour: without --copy-source AND
   # without --allow-full-archive, cmd_restore now refuses to extract
@@ -2661,6 +2700,7 @@ main() {
   test_pbsbackupstore_open_pending_mount_no_timer
   test_panel_restore_rows_require_mountpoint
   test_cmd_ls_strips_trailing_slash_from_path_for_jq
+  test_pbsbackupstore_mountPoint_uses_current_snapshot
   test_state_dirs_outside_plugin_dir
   test_backup_no_json_flag
   test_pbs_group_helper

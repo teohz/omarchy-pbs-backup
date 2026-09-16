@@ -373,14 +373,24 @@ Singleton {
     mounts = copy
   }
 
-  // The current/most-recently-mounted entry's mountPath, or "" if no
-  // mounts. Replaces the old `mountPoint` string for callers that
-  // want "the mount we're listing right now". lsProc populates this
-  // whenever it sets a new mountPoint on the listing.
+  // Bug 19: the mount path for the snapshot+archive the user is
+  // currently listing, or "" if no such entry exists. The previous
+  // version returned `mounts[length - 1].mountPath` (the LAST
+  // entry's path), which was wrong when the user had mounted more
+  // than one snapshot: switching snapshots and switching back did
+  // NOT update `mountPoint` (findMount returns the existing index
+  // instead of calling addMount again), so restore's --copy-source
+  // pointed at a different snapshot's mount. cp's [ -e "$source" ]
+  // check failed and the slow path took over (now opt-in via
+  // --allow-full-archive — see Bug 17). Looking up by
+  // (currentSnapshot, currentArchive) gives the entry that actually
+  // matches what the user is browsing.
   readonly property string mountPoint: {
-    if (mounts.length === 0) return ""
-    var cur = mounts[mounts.length - 1]
-    return cur ? String(cur.mountPath || "") : ""
+    if (currentSnapshot === "" || currentArchive === "") return ""
+    var idx = findMount(currentSnapshot, currentArchive)
+    if (idx === -1) return ""
+    var m = mounts[idx]
+    return m ? String(m.mountPath || "") : ""
   }
 
   // Open a specific mount path in the user's file manager and fire a
